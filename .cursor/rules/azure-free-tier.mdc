@@ -1,0 +1,17 @@
+---
+description: Use only Azure free-tier resources. Never create billable Azure infrastructure.
+alwaysApply: true
+---
+
+# Azure free tier only
+
+This subscription is pay-as-you-go (`PayAsYouGo_2014-09-01`) with spending limit Off. Anything outside an always-free quota can charge the account.
+
+- Do not create, scale, or deploy a paid Azure SKU. This includes PostgreSQL Flexible Server, Service Bus, Container Registry, Key Vault, Blob Storage accounts, Log Analytics beyond a verified free allowance, and Azure AI Foundry model deployments.
+- Do not treat 12-month new-customer offers as available. This subscription is not a spending-capped free trial.
+- Allowed Azure service, and only after an explicit deploy step: Azure AI Search SKU `free` (50 MB, 10,000 documents, 3 indexes, one service per subscription). Stay inside that quota. Free tier has no semantic ranker and no managed identity.
+- Container Apps has a monthly free grant, then it bills. Do not deploy it while spending limit is Off.
+- Foundry chat, extraction, and embedding calls are pay-per-token. Keep the provider interface, and use the explicit local mock until a $0 deployment is verified. Never silently fall back to fake AI results.
+- Local runtime is Docker Compose: PostgreSQL, Azurite, and a database-backed queue. Bicep may describe paid resources only as undeployed future options, clearly marked not for this subscription.
+- Before any `az deployment` or resource create, show the SKU and stop if it is not an always-free SKU inside quota.
+- Temporary exception (operator-authorized after cost review, 2026-10-10): paid POC SKUs may exist only in `rg-meridian-poc` for ~10 days — Postgres `Standard_B1ms`, Storage `Standard_LRS`, Service Bus `Standard`, ACR `Basic`, Key Vault `standard`. Container Apps Consumption may exist after an explicit deploy request. Azure OpenAI / Foundry chat (`kind OpenAI`, SKU `S0`, model `gpt-4o-mini`) may exist only with operator-authorized spend capped at **USD $10** via a Cost Management budget alert; keep TPM capacity minimal (1). Never silently fall back to mock when `MODEL_PROVIDER=foundry`. Delete these resources when the POC window ends.

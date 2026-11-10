@@ -1,0 +1,387 @@
+@import "tailwindcss";
+
+:root {
+  --brand: #6366f1;
+  --brand-dark: #4f46e5;
+  --brand-soft: #eef2ff;
+  --ink: #0f172a;
+  --ink-muted: #64748b;
+  --line: #e2e8f0;
+  --paper: #f8fafc;
+  --surface: #ffffff;
+  --success: #16a34a;
+  --success-soft: #dcfce7;
+  --warn: #2563eb;
+  --warn-soft: #dbeafe;
+  --danger: #dc2626;
+  --sidebar: #0b1220;
+  --sidebar-border: #1e293b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  background: var(--paper);
+  font-family: var(--font-body), system-ui, sans-serif;
+}
+
+@layer base {
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.tm-container {
+  width: min(1120px, calc(100% - 2rem));
+  margin-inline: auto;
+}
+
+.tm-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 4%);
+}
+
+.tm-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 10px;
+  padding: 0.7rem 1.15rem;
+  font-size: 0.925rem;
+  font-weight: 600;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: 0.15s ease;
+}
+
+.tm-btn-primary {
+  background: var(--brand);
+  color: white;
+}
+
+.tm-btn-primary:hover {
+  background: var(--brand-dark);
+}
+
+.tm-btn-secondary {
+  background: white;
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.tm-btn-secondary:hover {
+  background: var(--paper);
+}
+
+.tm-btn-danger {
+  background: #fff1f2;
+  border-color: #fecdd3;
+  color: var(--danger);
+}
+
+.tm-btn-danger:hover {
+  background: #ffe4e6;
+}
+
+.tm-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.tm-btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: white;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #334155;
+  transition: 0.15s ease;
+}
+
+.tm-btn-ghost:hover {
+  border-color: #c7d2fe;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+}
+
+.tm-btn-ghost-danger {
+  color: var(--danger);
+}
+
+.tm-btn-ghost-danger:hover {
+  border-color: #fecdd3;
+  background: #fff1f2;
+  color: var(--danger);
+}
+
+.tm-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border-radius: 999px;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.35rem 0.75rem;
+}
+
+.tm-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.2rem 0.65rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.tm-status-spin {
+  display: inline-flex;
+  animation: tm-spin 0.75s linear infinite;
+}
+
+@keyframes tm-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.tm-pill-success {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.tm-pill-running {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.tm-pill-muted {
+  background: #f1f5f9;
+  color: var(--ink-muted);
+}
+
+.tm-pill-danger {
+  background: #fee2e2;
+  color: var(--danger);
+}
+
+.tm-skeleton {
+  background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
+  background-size: 200% 100%;
+  animation: tm-shimmer 1.2s ease-in-out infinite;
+  border-radius: 12px;
+}
+
+@keyframes tm-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.tm-drawer-panel {
+  will-change: transform;
+  transition-duration: 280ms;
+}
+
+.tm-drawer-backdrop {
+  will-change: opacity;
+  transition-duration: 280ms;
+}
+
+@keyframes tm-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes tm-scale-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Desktop nav item hover/active feel */
+.tm-nav-link {
+  transition:
+    background-color 180ms ease,
+    color 180ms ease,
+    transform 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.tm-nav-link:hover {
+  transform: translateX(2px);
+}
+
+@keyframes tm-word {
+  from {
+    opacity: 0;
+    transform: translateY(22px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.tm-fade {
+  opacity: 0;
+  animation: tm-word 0.9s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.tm-word {
+  display: inline-block;
+  margin-right: 0.28em;
+  opacity: 0;
+  animation: tm-word 0.9s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.tm-word:last-child {
+  margin-right: 0;
+}
+
+@keyframes tm-rise {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.tm-rise {
+  animation: tm-rise 0.9s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes tm-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.tm-marquee {
+  overflow: hidden;
+}
+
+.tm-marquee-track {
+  display: flex;
+  width: max-content;
+  animation: tm-marquee 36s linear infinite;
+}
+
+.tm-marquee:hover .tm-marquee-track {
+  animation-play-state: paused;
+}
+
+@keyframes tm-edge {
+  from {
+    stroke-dashoffset: 80;
+    opacity: 0.2;
+  }
+  to {
+    stroke-dashoffset: 0;
+    opacity: 0.9;
+  }
+}
+
+.tm-edge {
+  stroke-width: 1.2;
+  stroke-dasharray: 80;
+  opacity: 0.7;
+  animation: tm-edge 2.8s ease-in-out infinite alternate;
+}
+
+@keyframes tm-node {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.tm-node {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: tm-node 2.6s ease-in-out infinite;
+}
+
+@keyframes tm-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+.tm-float {
+  animation: tm-float 6s ease-in-out infinite;
+}
+
+@keyframes tm-bar {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+.tm-bar {
+  transform-origin: left center;
+  animation: tm-bar 1.1s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tm-word,
+  .tm-fade,
+  .tm-rise,
+  .tm-edge,
+  .tm-node,
+  .tm-float,
+  .tm-bar,
+  .tm-marquee-track {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}

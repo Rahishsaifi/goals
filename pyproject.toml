@@ -1,0 +1,47 @@
+[project]
+name = "recruitment-intelligence"
+version = "0.1.0"
+description = "Local-first recruitment intelligence platform"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv.workspace]
+members = ["services/api", "services/worker", "packages/contracts", "packages/scoring"]
+
+[dependency-groups]
+dev = [
+  "httpx2>=2.13.1",
+  "mypy>=1.14",
+  "pytest>=8.3",
+  "ruff>=0.9",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["services/api", "services/worker", "packages/contracts", "packages/scoring"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*" = ["E402"]
+"services/worker/worker/main.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["app", "recruitment_contracts", "recruitment_scoring", "worker"]
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = ["services/api", "services/worker", "packages/contracts/src", "packages/scoring/src"]
+
+[tool.pytest.ini_options]
+testpaths = ["services/api/tests", "services/worker/tests", "packages/scoring/tests"]
+pythonpath = [
+  "services/api",
+  "services/worker",
+  "packages/contracts/src",
+  "packages/scoring/src",
+]
+addopts = "-q"
