@@ -1258,7 +1258,7 @@ export default function GoalsLocalizationPage() {
                 ) : null}
               </div>
             </div>
-            {job?.error_message ? (
+            {job?.error_message && (job.status === "FAILED" || job.status === "CANCELLED") ? (
               <div className="mb-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
                 {job.error_message}
               </div>
