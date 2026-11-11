@@ -88,6 +88,31 @@ def _job_payload(job) -> dict[str, object]:
     }
 
 
+def _job_list_item(job) -> dict[str, object]:
+    """Small row for the files list; the full payload is fetched per job."""
+    summary = job.summary or {}
+    cost = job.cost_estimate or {}
+    options = job.options or {}
+    return {
+        "id": str(job.id),
+        "status": job.status.value if hasattr(job.status, "value") else str(job.status),
+        "target_language": job.target_language,
+        "options": {"qa_mode": options.get("qa_mode")},
+        "summary": {
+            key: summary.get(key) for key in ("corrected_records", "unresolved_issues")
+        },
+        "cost_estimate": {"translator_characters_sent": cost.get("translator_characters_sent")},
+        "total_records": job.total_records,
+        "production_ready": job.production_ready,
+        "error_message": job.error_message,
+        "source_filename": job.source_filename,
+        "has_output": bool(job.output_blob_name),
+        "has_report": bool(job.report_blob_name),
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+    }
+
+
 @router.get("/languages")
 def get_languages() -> dict[str, object]:
     """Public static config for the localization UI (no secrets)."""
@@ -324,7 +349,7 @@ def list_jobs(
     if auth.tenant_id is None:
         raise HTTPException(status_code=403, detail="Tenant context required.")
     jobs = job_service.list_jobs(db, tenant_id=auth.tenant_id)
-    return {"jobs": [_job_payload(job) for job in jobs]}
+    return {"jobs": [_job_list_item(job) for job in jobs]}
 
 
 @router.get("/jobs/{job_id}/logs")

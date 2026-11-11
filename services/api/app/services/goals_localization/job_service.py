@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import get_settings
@@ -214,6 +214,7 @@ def list_jobs(db: Session, *, tenant_id: uuid.UUID, limit: int = 50) -> list[Loc
     return list(
         db.scalars(
             select(LocalizationJob)
+            .options(defer(LocalizationJob.events))
             .where(LocalizationJob.tenant_id == tenant_id)
             .order_by(LocalizationJob.created_at.desc())
             .limit(limit)

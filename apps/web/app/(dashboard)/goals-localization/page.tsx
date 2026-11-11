@@ -475,7 +475,7 @@ export default function GoalsLocalizationPage() {
       .then(async (response) => (response.ok ? response.json() : null))
       .then((body) => {
         const latest = (body?.jobs as JobPayload[] | undefined)?.[0];
-        if (latest) setJob((current) => current ?? latest);
+        if (latest) void refreshJob(latest.id);
       })
       .catch(() => undefined);
   }, [queue, job, refreshJob]);
