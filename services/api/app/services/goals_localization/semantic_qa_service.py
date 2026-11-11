@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
+from collections import deque
 from pathlib import Path
 from typing import Literal
 
@@ -57,10 +60,48 @@ def _load_prompt(path: Path) -> str:
 
 
 class SemanticQAService:
-    def __init__(self, provider: FoundryModelProvider) -> None:
+    def __init__(
+        self, provider: FoundryModelProvider, gate: FoundryRateGate | None = None
+    ) -> None:
         self.provider = provider
+        self.gate = gate
         self.input_tokens = 0
         self.output_tokens = 0
+        self._usage_lock = threading.Lock()
+
+    def _record_usage(self, usage: object) -> None:
+        with self._usage_lock:
+            self.input_tokens += getattr(usage, "input_tokens", None) or 0
+            self.output_tokens += getattr(usage, "output_tokens", None) or 0
+
+    def _chat(self, *, system: str, user: str, max_attempts: int = 5) -> dict[str, object]:
+        """Foundry call with a shared rate limit. Safe to call from worker threads."""
+        # Rough estimate: ~4 characters per token for the prompt, plus the reply.
+        estimate = (len(system) + len(user)) // 4 + 600
+        attempt = 0
+        while True:
+            attempt += 1
+            if self.gate is not None:
+                self.gate.acquire(estimate)
+            try:
+                payload = self.provider._chat_json(system=system, user=user)
+            except FoundryProviderError as exc:
+                if attempt >= max_attempts:
+                    raise
+                delay = min(60.0, 5.0 * 2 ** (attempt - 1))
+                if "429" in str(exc) and self.gate is not None:
+                    self.gate.pause(delay)
+                logger.warning(
+                    "foundry_retry attempt=%s/%s delay=%.0fs error=%s",
+                    attempt,
+                    max_attempts,
+                    delay,
+                    str(exc)[:200],
+                )
+                time.sleep(delay)
+                continue
+            self._record_usage(payload["usage"])
+            return payload
 
     def assess_record(
         self,
@@ -164,11 +205,37 @@ class SemanticQAService:
             },
             ensure_ascii=False,
         )
-        payload = self.provider._chat_json(system=system, user=user)
-        usage = payload["usage"]
-        self.input_tokens += usage.input_tokens or 0
-        self.output_tokens += usage.output_tokens or 0
+        payload = self._chat(system=system, user=user)
         return normalize_revision(payload["json"], originals)
+
+
+class FoundryRateGate:
+    """Shared tokens-per-minute ceiling and 429 pause for parallel Foundry requests."""
+
+    def __init__(self, tokens_per_minute: int) -> None:
+        self.limit = max(1000, tokens_per_minute)
+        self._lock = threading.Lock()
+        self._sent: deque[tuple[float, int]] = deque()
+        self._paused_until = 0.0
+
+    def acquire(self, tokens: int) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                while self._sent and now - self._sent[0][0] >= 60:
+                    self._sent.popleft()
+                wait = self._paused_until - now
+                if wait <= 0:
+                    used = sum(count for _, count in self._sent)
+                    if not self._sent or used + tokens <= self.limit:
+                        self._sent.append((now, tokens))
+                        return
+                    wait = 60 - (now - self._sent[0][0])
+            time.sleep(min(max(wait, 0.05), 5.0))
+
+    def pause(self, seconds: float) -> None:
+        with self._lock:
+            self._paused_until = max(self._paused_until, time.monotonic() + seconds)
 
 
 def normalize_revision(raw: object, originals: dict[str, str]) -> RecordRevision:
@@ -193,11 +260,11 @@ def normalize_revision(raw: object, originals: dict[str, str]) -> RecordRevision
     return RecordRevision.model_validate(normalized)
 
 
-def build_semantic_qa_service() -> SemanticQAService:
+def build_semantic_qa_service(gate: FoundryRateGate | None = None) -> SemanticQAService:
     try:
         provider = FoundryModelProvider()
     except FoundryProviderError as exc:
         raise FoundryProviderError(
             f"Semantic QA requires Foundry/Azure OpenAI configuration: {exc}"
         ) from exc
-    return SemanticQAService(provider)
+    return SemanticQAService(provider, gate)

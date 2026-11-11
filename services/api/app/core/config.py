@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     # Stay under the Translator F0 window of about 33,300 characters per minute.
     goals_localization_translator_chars_per_minute: int = 30000
     goals_localization_max_correction_attempts: int = 1
+    # Foundry semantic review: parallel row requests and a tokens-per-minute ceiling kept
+    # below the deployment quota.
+    goals_foundry_concurrency: int = 24
+    goals_foundry_tokens_per_minute: int = 600000
     session_cookie_name: str = "ri_session"
     csrf_cookie_name: str = "ri_csrf"
     csrf_header_name: str = "x-csrf-token"

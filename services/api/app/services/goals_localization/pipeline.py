@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from typing import Any
 
@@ -38,7 +39,10 @@ from app.services.goals_localization.glossary_store import (
 from app.services.goals_localization.hard_gate import evaluate_hard_gate
 from app.services.goals_localization.numeric_validator import compare_numeric_fields
 from app.services.goals_localization.qa_report_generator import build_qa_report
-from app.services.goals_localization.semantic_qa_service import build_semantic_qa_service
+from app.services.goals_localization.semantic_qa_service import (
+    FoundryRateGate,
+    build_semantic_qa_service,
+)
 from app.services.goals_localization.terminology_protection import verify_preserved_terms
 from app.services.goals_localization.translation_repair import repair_translation
 from app.services.goals_localization.translator_service import (
@@ -121,10 +125,16 @@ def _set_stage(
     if check_cancel:
         _ensure_not_cancelled(db, job)
     progress = dict(job.stage_progress or {})
+    now_iso = datetime.now(UTC).isoformat()
+    previous = progress.get(stage)
+    started_at = now_iso
+    if isinstance(previous, dict) and previous.get("status") == "running" and status != "queued":
+        started_at = str(previous.get("started_at") or previous.get("updated_at") or now_iso)
     progress[stage] = {
         "status": status,
         "detail": detail,
-        "updated_at": datetime.now(UTC).isoformat(),
+        "started_at": started_at,
+        "updated_at": now_iso,
     }
     job.stage_progress = progress
     job.current_stage = stage
@@ -378,118 +388,144 @@ def _run_localization_job(
             job.status = LocalizationJobStatus.semantic_qa
             _set_stage(db, job, "semantic_qa", "running")
             db.flush()
-            qa = build_semantic_qa_service()
+            concurrency = max(1, settings.goals_foundry_concurrency)
+            qa = build_semantic_qa_service(
+                FoundryRateGate(settings.goals_foundry_tokens_per_minute)
+            )
             semantic_prompt, _custom = load_semantic_prompt(db, job.tenant_id)
             _set_stage(db, job, "automatic_correction", "running")
             review_total = len(record_rows)
-            log_job_event(job, f"Foundry is reviewing {review_total:,} rows for meaning.")
+            log_job_event(
+                job,
+                f"Foundry is reviewing {review_total:,} rows for meaning "
+                f"({concurrency} requests in parallel).",
+            )
             skipped_rows = 0
             review_bucket = -1
-            for index, rec in enumerate(record_rows):
-                if index and index % 10 == 0:
-                    percent = int(index * 100 / max(1, review_total))
-                    if percent // 10 != review_bucket:
-                        review_bucket = percent // 10
+            preserve_list = list(glossary.preserve)
+
+            def _review(texts: dict[str, str]) -> Any:
+                # Runs in a pool thread: Foundry HTTP only, no ORM or database access.
+                return qa.revise_record(
+                    target_language=language.code,
+                    preserve_terms=preserve_list,
+                    system_prompt=semantic_prompt,
+                    **texts,
+                )
+
+            pool = ThreadPoolExecutor(max_workers=concurrency)
+            try:
+                futures = {
+                    pool.submit(
+                        _review,
+                        {
+                            "source_goal": rec.source_goal or "",
+                            "source_description": rec.source_description or "",
+                            "source_kra": rec.source_kra or "",
+                            "translated_goal": rec.translated_goal or "",
+                            "translated_description": rec.translated_description or "",
+                            "translated_kra": rec.translated_kra or "",
+                        },
+                    ): rec
+                    for rec in record_rows
+                }
+                reviewed = 0
+                for future in as_completed(futures):
+                    rec = futures[future]
+                    reviewed += 1
+                    try:
+                        revision = future.result()
+                    except FoundryProviderError as exc:
+                        # Do not block the whole worker queue on one rate-limited record.
+                        logger.warning(
+                            "semantic_revision_skipped job_id=%s record=%s error=%s",
+                            job.id,
+                            rec.source_record_key,
+                            str(exc)[:200],
+                        )
+                        rec.qa_status = "needs_human_review"
+                        rec.translation_status = LocalizationRecordStatus.needs_human_review
+                        unresolved_high += 1
+                        skipped_rows += 1
                         log_job_event(
                             job,
-                            f"Foundry reviewed {index:,} of {review_total:,} rows ({percent}%); "
-                            f"{corrected_count} fields revised so far.",
+                            f"Foundry skipped row {rec.source_record_key}: {str(exc)[:160]}",
+                            "warning",
                         )
-                    _set_stage(
-                        db,
-                        job,
-                        "semantic_qa",
-                        "running",
-                        f"{index:,}/{review_total:,} rows reviewed",
-                        log=False,
-                    )
-                if index:
-                    # Soft throttle to stay inside low TPM quotas between records.
-                    time.sleep(0.4)
-                try:
-                    revision = qa.revise_record(
-                        target_language=language.code,
-                        source_goal=rec.source_goal,
-                        source_description=rec.source_description,
-                        source_kra=rec.source_kra,
-                        translated_goal=rec.translated_goal,
-                        translated_description=rec.translated_description,
-                        translated_kra=rec.translated_kra,
-                        preserve_terms=list(glossary.preserve),
-                        system_prompt=semantic_prompt,
-                    )
-                except FoundryProviderError as exc:
-                    # Do not block the whole worker queue on one rate-limited record.
-                    logger.warning(
-                        "semantic_revision_skipped job_id=%s record=%s error=%s",
-                        job.id,
-                        rec.source_record_key,
-                        str(exc)[:200],
-                    )
-                    rec.qa_status = "needs_human_review"
-                    rec.translation_status = LocalizationRecordStatus.needs_human_review
-                    unresolved_high += 1
-                    skipped_rows += 1
-                    log_job_event(
-                        job,
-                        f"Foundry skipped row {rec.source_record_key}: {str(exc)[:160]}",
-                        "warning",
-                    )
-                    db.add(
-                        LocalizationQAResult(
-                            job_id=job.id,
-                            record_id=rec.id,
-                            tenant_id=job.tenant_id,
-                            field_name="goal",
-                            issue_type="FOUNDRY_UNAVAILABLE",
-                            severity="HIGH",
-                            original_text=rec.source_goal,
-                            translated_text=rec.translated_goal,
-                            explanation=(
-                                "Semantic revision skipped due to Foundry error: "
-                                f"{str(exc)[:300]}"
-                            ),
+                        db.add(
+                            LocalizationQAResult(
+                                job_id=job.id,
+                                record_id=rec.id,
+                                tenant_id=job.tenant_id,
+                                field_name="goal",
+                                issue_type="FOUNDRY_UNAVAILABLE",
+                                severity="HIGH",
+                                original_text=rec.source_goal,
+                                translated_text=rec.translated_goal,
+                                explanation=(
+                                    "Semantic revision skipped due to Foundry error: "
+                                    f"{str(exc)[:300]}"
+                                ),
+                            )
                         )
-                    )
-                    db.flush()
-                    continue
-
-                changed_fields = 0
-                for field_name in ("goal", "description", "kra"):
-                    revised = getattr(revision, field_name)
-                    if not revised.changed:
-                        continue
-                    source_text = getattr(rec, f"source_{field_name}")
-                    current = repair_translation(
-                        source_text,
-                        revised.text,
-                        language.azure_translator_code,
-                        glossary.preserve,
-                    )
-                    if source_text.strip() and not current.strip():
-                        continue
-                    setattr(rec, f"translated_{field_name}", current)
-                    changed_fields += 1
-                    corrected_count += 1
-                    db.add(
-                        LocalizationQAResult(
-                            job_id=job.id,
-                            record_id=rec.id,
-                            tenant_id=job.tenant_id,
-                            field_name=field_name,
-                            issue_type="SEMANTIC_REVISION",
-                            severity="LOW",
-                            original_text=source_text,
-                            translated_text=current,
-                            explanation=revised.reason or "Foundry revised the meaning.",
+                    else:
+                        changed_fields = 0
+                        for field_name in ("goal", "description", "kra"):
+                            revised = getattr(revision, field_name)
+                            if not revised.changed:
+                                continue
+                            source_text = getattr(rec, f"source_{field_name}")
+                            current = repair_translation(
+                                source_text,
+                                revised.text,
+                                language.azure_translator_code,
+                                glossary.preserve,
+                            )
+                            if source_text.strip() and not current.strip():
+                                continue
+                            setattr(rec, f"translated_{field_name}", current)
+                            changed_fields += 1
+                            corrected_count += 1
+                            db.add(
+                                LocalizationQAResult(
+                                    job_id=job.id,
+                                    record_id=rec.id,
+                                    tenant_id=job.tenant_id,
+                                    field_name=field_name,
+                                    issue_type="SEMANTIC_REVISION",
+                                    severity="LOW",
+                                    original_text=source_text,
+                                    translated_text=current,
+                                    explanation=revised.reason or "Foundry revised the meaning.",
+                                )
+                            )
+                        if changed_fields:
+                            rec.translation_status = LocalizationRecordStatus.corrected
+                            rec.qa_status = "revised"
+                        else:
+                            rec.translation_status = LocalizationRecordStatus.qa_pass
+                            rec.qa_status = "pass"
+                    if reviewed % 10 == 0 or reviewed == review_total:
+                        percent = int(reviewed * 100 / max(1, review_total))
+                        if percent // 10 != review_bucket:
+                            review_bucket = percent // 10
+                            log_job_event(
+                                job,
+                                f"Foundry reviewed {reviewed:,} of {review_total:,} rows "
+                                f"({percent}%); {corrected_count} fields revised so far.",
+                            )
+                        # Commits progress and raises LocalizationCancelled on cancel.
+                        _set_stage(
+                            db,
+                            job,
+                            "semantic_qa",
+                            "running",
+                            f"{reviewed:,}/{review_total:,} rows reviewed",
+                            log=False,
                         )
-                    )
-                if changed_fields:
-                    rec.translation_status = LocalizationRecordStatus.corrected
-                    rec.qa_status = "revised"
-                else:
-                    rec.translation_status = LocalizationRecordStatus.qa_pass
-                    rec.qa_status = "pass"
+            finally:
+                # On cancel or error, drop requests that have not started yet.
+                pool.shutdown(wait=False, cancel_futures=True)
             job.cost_estimate = {
                 **dict(job.cost_estimate or {}),
                 "semantic_qa_input_tokens": qa.input_tokens,

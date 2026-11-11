@@ -21,7 +21,10 @@ type JobPayload = {
   status: string;
   target_language: string;
   current_stage: string | null;
-  stage_progress: Record<string, { status?: string; detail?: string }>;
+  stage_progress: Record<
+    string,
+    { status?: string; detail?: string; started_at?: string; updated_at?: string }
+  >;
   stages: string[];
   options: Record<string, boolean | string>;
   summary: Record<string, unknown>;
@@ -620,6 +623,11 @@ export default function GoalsLocalizationPage() {
     const elapsedMs = Math.max(0, nowMs - Date.parse(job.created_at));
     return formatDuration(elapsedMs);
   }, [job, nowMs]);
+
+  const totalLabel = useMemo(() => {
+    if (!job?.created_at || !job.completed_at || !TERMINAL.has(job.status)) return null;
+    return formatDuration(Date.parse(job.completed_at) - Date.parse(job.created_at));
+  }, [job]);
 
   const rowCounts = useMemo(() => {
     const total = job?.total_records ?? 0;
@@ -1293,6 +1301,10 @@ export default function GoalsLocalizationPage() {
                   {" · "}
                   {elapsedLabel}
                 </span>
+              ) : totalLabel ? (
+                <span className="text-slate-700">
+                  Total time <span className="font-semibold tabular-nums text-slate-900">{totalLabel}</span>
+                </span>
               ) : null}
             </p>
             <ol>
@@ -1312,6 +1324,14 @@ export default function GoalsLocalizationPage() {
                         : isActive
                           ? "In Progress"
                           : "Pending";
+                const startedMs = info?.started_at ? Date.parse(info.started_at) : NaN;
+                const stageMs =
+                  status === "running" && !TERMINAL.has(job?.status ?? "")
+                    ? Math.max(0, nowMs - startedMs)
+                    : info?.updated_at
+                      ? Date.parse(info.updated_at) - startedMs
+                      : NaN;
+                const stageTime = status !== "pending" && Number.isFinite(stageMs) ? formatDuration(stageMs) : null;
                 return (
                   <li
                     key={stage}
@@ -1346,6 +1366,9 @@ export default function GoalsLocalizationPage() {
                       }`}
                     >
                       {statusLabel}
+                    </span>
+                    <span className="w-12 shrink-0 text-right text-[11px] tabular-nums text-slate-500">
+                      {stageTime ?? ""}
                     </span>
                     <span className="sr-only">{index + 1}</span>
                   </li>
