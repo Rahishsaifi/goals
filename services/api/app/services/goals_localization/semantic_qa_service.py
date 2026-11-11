@@ -12,6 +12,7 @@ from app.integrations.foundry_provider import FoundryModelProvider, FoundryProvi
 logger = logging.getLogger(__name__)
 _PROMPT_PATH = Path(__file__).resolve().parents[2] / "goals_localization" / "prompts" / "semantic_translation_qa.txt"
 _CORRECTION_PATH = Path(__file__).resolve().parents[2] / "goals_localization" / "prompts" / "translation_correction.txt"
+_REVISION_PATH = Path(__file__).resolve().parents[2] / "goals_localization" / "prompts" / "semantic_revision.txt"
 
 
 class QAIssue(BaseModel):
@@ -36,6 +37,18 @@ class CorrectionResult(BaseModel):
     field: Literal["goal", "description", "kra"]
     corrected_text: str
     notes: str = ""
+
+
+class RevisedField(BaseModel):
+    text: str
+    changed: bool = False
+    reason: str = ""
+
+
+class RecordRevision(BaseModel):
+    goal: RevisedField
+    description: RevisedField
+    kra: RevisedField
 
 
 def _load_prompt(path: Path) -> str:
@@ -116,6 +129,66 @@ class SemanticQAService:
         raw = payload["json"]
         raw["field"] = field
         return CorrectionResult.model_validate(raw)
+
+    def revise_record(
+        self,
+        *,
+        target_language: str,
+        source_goal: str,
+        source_description: str,
+        source_kra: str,
+        translated_goal: str,
+        translated_description: str,
+        translated_kra: str,
+        preserve_terms: list[str],
+    ) -> RecordRevision:
+        """Ask Foundry to repair meaning. Unchanged fields come back as written."""
+        originals = {
+            "goal": translated_goal,
+            "description": translated_description,
+            "kra": translated_kra,
+        }
+        system = _load_prompt(_REVISION_PATH)
+        user = json.dumps(
+            {
+                "target_language": target_language,
+                "preserve_terms": preserve_terms,
+                "source": {
+                    "goal": source_goal,
+                    "description": source_description,
+                    "kra": source_kra,
+                },
+                "translation": originals,
+            },
+            ensure_ascii=False,
+        )
+        payload = self.provider._chat_json(system=system, user=user)
+        usage = payload["usage"]
+        self.input_tokens += usage.input_tokens or 0
+        self.output_tokens += usage.output_tokens or 0
+        return normalize_revision(payload["json"], originals)
+
+
+def normalize_revision(raw: object, originals: dict[str, str]) -> RecordRevision:
+    """Keep the translator text when Foundry omits a field or returns a blank."""
+    payload = raw if isinstance(raw, dict) else {}
+    normalized: dict[str, dict[str, object]] = {}
+    for field, original in originals.items():
+        item = payload.get(field, {})
+        if isinstance(item, str):
+            item = {"text": item, "changed": item != original}
+        if not isinstance(item, dict):
+            item = {}
+        text = str(item.get("text") or original)
+        if original.strip() and not text.strip():
+            text = original
+        changed = bool(item.get("changed")) and text != original
+        normalized[field] = {
+            "text": text,
+            "changed": changed,
+            "reason": str(item.get("reason") or "") if changed else "",
+        }
+    return RecordRevision.model_validate(normalized)
 
 
 def build_semantic_qa_service() -> SemanticQAService:

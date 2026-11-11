@@ -17,6 +17,16 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    exists = bind.execute(
+        sa.text(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'localization_glossaries' "
+            "AND column_name = 'paid_translator_enabled'"
+        )
+    ).scalar()
+    if exists:
+        return
     op.add_column(
         "localization_glossaries",
         sa.Column(

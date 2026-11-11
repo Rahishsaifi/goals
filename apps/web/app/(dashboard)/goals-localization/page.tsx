@@ -98,6 +98,77 @@ const WIZARD_STEPS = [
   { id: 3, label: "Review & Download" },
 ] as const;
 
+const PAID_USD_PER_MILLION = 10;
+
+function parseCsvRows(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quoted) {
+      if (char === '"' && text[index + 1] === '"') {
+        cell += '"';
+        index += 1;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        cell += char;
+      }
+    } else if (char === '"') {
+      quoted = true;
+    } else if (char === ",") {
+      row.push(cell);
+      cell = "";
+    } else if (char === "\n") {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+    } else if (char !== "\r") {
+      cell += char;
+    }
+  }
+  if (cell.length || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows;
+}
+
+function estimateTranslation(text: string): {
+  rows: number;
+  characters: number;
+  uniqueCharacters: number;
+  costUsd: number;
+} {
+  const table = parseCsvRows(text.replace(/^\uFEFF/, ""));
+  const headers = (table[0] ?? []).map((header) => header.replace(/[^a-z]/gi, "").toLowerCase());
+  const columns = ["goal", "description", "kra"]
+    .map((name) => headers.indexOf(name))
+    .filter((index) => index >= 0);
+  const unique = new Map<string, number>();
+  let characters = 0;
+  let rows = 0;
+  for (const record of table.slice(1)) {
+    const values = columns.map((index) => (record[index] ?? "").trim()).filter(Boolean);
+    if (!values.length) continue;
+    rows += 1;
+    for (const value of values) {
+      characters += value.length;
+      if (!unique.has(value)) unique.set(value, value.length);
+    }
+  }
+  const uniqueCharacters = [...unique.values()].reduce((sum, length) => sum + length, 0);
+  return {
+    rows,
+    characters,
+    uniqueCharacters,
+    costUsd: (uniqueCharacters / 1_000_000) * PAID_USD_PER_MILLION,
+  };
+}
+
 function formatBytes(size: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
@@ -182,6 +253,24 @@ export default function GoalsLocalizationPage() {
   const [glossaryBusy, setGlossaryBusy] = useState(false);
   const [glossaryNote, setGlossaryNote] = useState<string | null>(null);
   const [englishFile, setEnglishFile] = useState<File | null>(null);
+  const [fileEstimate, setFileEstimate] = useState<{
+    rows: number;
+    characters: number;
+    uniqueCharacters: number;
+    costUsd: number;
+  } | null>(null);
+  const [estimateAccepted, setEstimateAccepted] = useState(false);
+  const [queue, setQueue] = useState<{
+    busy: boolean;
+    waiting: number;
+    active_count: number;
+    processing: {
+      source_filename: string;
+      processed_records: number;
+      total_records: number;
+      current_stage: string | null;
+    } | null;
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [job, setJob] = useState<JobPayload | null>(null);
@@ -237,6 +326,18 @@ export default function GoalsLocalizationPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const refreshQueue = useCallback(async () => {
+    const response = await fetch(`${API_BASE}/api/v1/goals-localization/queue`, { credentials: "include" });
+    if (!response.ok) return;
+    setQueue(await response.json());
+  }, []);
+
+  useEffect(() => {
+    void refreshQueue();
+    const timer = window.setInterval(() => void refreshQueue(), 4000);
+    return () => window.clearInterval(timer);
+  }, [refreshQueue]);
+
   const refreshJob = useCallback(async (jobId: string) => {
     const response = await fetch(`${API_BASE}/api/v1/goals-localization/jobs/${jobId}`, {
       credentials: "include",
@@ -262,7 +363,7 @@ export default function GoalsLocalizationPage() {
 
   const selectedLanguage = languages.find((lang) => lang.code === targetLanguage);
   const optionList = mandatoryOptions.length ? mandatoryOptions : DEFAULT_OPTIONS;
-  const canStart = Boolean(englishFile && targetLanguage && !busy);
+  const canStart = Boolean(englishFile && targetLanguage && estimateAccepted && !busy);
   const stageList = job?.stages?.length ? job.stages : stages.length ? stages : Object.keys(STAGE_LABELS);
 
   const stageStatuses = useMemo(() => {
@@ -447,8 +548,19 @@ export default function GoalsLocalizationPage() {
 
   function onClear() {
     setEnglishFile(null);
+    setFileEstimate(null);
+    setEstimateAccepted(false);
     setError(null);
     setJob(null);
+  }
+
+  async function onPickFile(file: File | null) {
+    setEnglishFile(file);
+    setEstimateAccepted(false);
+    setFileEstimate(null);
+    if (!file) return;
+    const estimate = estimateTranslation(await file.text());
+    setFileEstimate(estimate);
   }
 
   function downloadUrl(kind: "download" | "report") {
@@ -550,7 +662,7 @@ export default function GoalsLocalizationPage() {
                       onClick={(event) => {
                         event.preventDefault();
                         event.stopPropagation();
-                        setEnglishFile(null);
+                        void onPickFile(null);
                       }}
                     >
                       ✕
@@ -561,12 +673,42 @@ export default function GoalsLocalizationPage() {
                     accept=".csv,text/csv"
                     className="sr-only"
                     onChange={(event: ChangeEvent<HTMLInputElement>) => {
-                      setEnglishFile(event.target.files?.[0] ?? null);
+                      void onPickFile(event.target.files?.[0] ?? null);
                       event.target.value = "";
                     }}
                   />
                 </label>
               </div>
+              {fileEstimate && !estimateAccepted ? (
+                <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-950">
+                  <p className="font-semibold">
+                    {fileEstimate.rows.toLocaleString()} rows · {fileEstimate.characters.toLocaleString()} characters in the file
+                  </p>
+                  <p className="mt-1">
+                    {fileEstimate.uniqueCharacters.toLocaleString()} unique characters will be sent. Repeated Goal, Description, and KRA text is translated once and reused.
+                  </p>
+                  <p className="mt-1">
+                    Estimated paid cost ${fileEstimate.costUsd.toFixed(2)} at $10 per million unique characters.
+                    The free account stops at 2 million characters a month and does not upgrade itself.
+                  </p>
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      type="button"
+                      className="tm-btn tm-btn-primary !px-2.5 !py-1.5 text-xs"
+                      onClick={() => setEstimateAccepted(true)}
+                    >
+                      Continue
+                    </button>
+                    <button
+                      type="button"
+                      className="tm-btn tm-btn-secondary !px-2.5 !py-1.5 text-xs"
+                      onClick={() => void onPickFile(null)}
+                    >
+                      Skip
+                    </button>
+                  </div>
+                </div>
+              ) : null}
             </div>
 
             <label className="block">
@@ -763,6 +905,25 @@ export default function GoalsLocalizationPage() {
           </div>
 
           <div className="px-4 py-3">
+            <div
+              className={`mb-2 rounded-lg px-3 py-2 text-xs ${
+                queue?.busy ? "bg-indigo-50 text-indigo-950" : "bg-slate-50 text-slate-600"
+              }`}
+            >
+              {queue?.busy && queue.processing ? (
+                <p>
+                  Worker is processing {queue.processing.source_filename}: {queue.processing.processed_records.toLocaleString()} of{" "}
+                  {queue.processing.total_records.toLocaleString()} rows.
+                  {queue.waiting > 0 ? ` ${queue.waiting} more file${queue.waiting === 1 ? "" : "s"} waiting.` : ""}
+                </p>
+              ) : queue && queue.waiting > 0 ? (
+                <p>
+                  Worker is idle. {queue.waiting} file{queue.waiting === 1 ? "" : "s"} waiting to start.
+                </p>
+              ) : (
+                <p>No file is in the worker queue.</p>
+              )}
+            </div>
             {job?.error_message ? (
               <div className="mb-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
                 {job.error_message}

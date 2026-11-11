@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+.git
+.venv
+node_modules
+.next
+.pytest_cache
+.azure
+.mypy_cache
+.ruff_cache
+__pycache__
+*.pem
+*.key

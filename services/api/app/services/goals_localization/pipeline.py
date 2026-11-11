@@ -35,6 +35,7 @@ from app.services.goals_localization.numeric_validator import compare_numeric_fi
 from app.services.goals_localization.qa_report_generator import build_qa_report
 from app.services.goals_localization.semantic_qa_service import build_semantic_qa_service
 from app.services.goals_localization.terminology_protection import verify_preserved_terms
+from app.services.goals_localization.translation_repair import repair_translation
 from app.services.goals_localization.translator_service import (
     CachedTranslator,
     TranslatorError,
@@ -256,13 +257,13 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
             _set_stage(db, job, "semantic_qa", "running")
             db.flush()
             qa = build_semantic_qa_service()
+            _set_stage(db, job, "automatic_correction", "running")
             for index, rec in enumerate(record_rows):
                 if index:
                     # Soft throttle to stay inside low TPM quotas between records.
                     time.sleep(0.4)
                 try:
-                    assessment = qa.assess_record(
-                        record_id=rec.source_record_key,
+                    revision = qa.revise_record(
                         target_language=language.code,
                         source_goal=rec.source_goal,
                         source_description=rec.source_description,
@@ -270,11 +271,12 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
                         translated_goal=rec.translated_goal,
                         translated_description=rec.translated_description,
                         translated_kra=rec.translated_kra,
+                        preserve_terms=list(glossary.preserve),
                     )
                 except FoundryProviderError as exc:
                     # Do not block the whole worker queue on one rate-limited record.
                     logger.warning(
-                        "semantic_qa_skipped job_id=%s record=%s error=%s",
+                        "semantic_revision_skipped job_id=%s record=%s error=%s",
                         job.id,
                         rec.source_record_key,
                         str(exc)[:200],
@@ -292,121 +294,47 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
                             severity="HIGH",
                             original_text=rec.source_goal,
                             translated_text=rec.translated_goal,
-                            explanation=f"Semantic QA skipped due to Foundry error: {str(exc)[:300]}",
+                            explanation=f"Semantic revision skipped due to Foundry error: {str(exc)[:300]}",
                         )
                     )
                     db.flush()
                     continue
 
-                if assessment.overall_status == "PASS":
-                    rec.qa_status = "pass"
-                    rec.translation_status = LocalizationRecordStatus.qa_pass
-                    continue
-
-                rec.qa_status = "fail"
-                rec.translation_status = LocalizationRecordStatus.qa_fail
-                job.status = LocalizationJobStatus.correcting
-                _set_stage(db, job, "automatic_correction", "running")
-                attempts = dict(rec.correction_attempts or {})
-                still_failing = False
-                for field_name, field_qa in assessment.fields.items():
-                    if field_qa.status == "PASS":
+                changed_fields = 0
+                for field_name in ("goal", "description", "kra"):
+                    revised = getattr(revision, field_name)
+                    if not revised.changed:
                         continue
-                    for issue in field_qa.issues:
-                        db.add(
-                            LocalizationQAResult(
-                                job_id=job.id,
-                                record_id=rec.id,
-                                tenant_id=job.tenant_id,
-                                field_name=field_name,
-                                issue_type=issue.type,
-                                severity=issue.severity,
-                                original_text=getattr(rec, f"source_{field_name}"),
-                                translated_text=getattr(rec, f"translated_{field_name}"),
-                                explanation=issue.explanation,
-                            )
-                        )
-                    attempt_count = int(attempts.get(field_name, 0))
                     source_text = getattr(rec, f"source_{field_name}")
-                    current = getattr(rec, f"translated_{field_name}")
-                    while attempt_count < settings.goals_localization_max_correction_attempts:
-                        attempt_count += 1
-                        try:
-                            correction = qa.correct_field(
-                                field=field_name,  # type: ignore[arg-type]
-                                target_language=language.code,
-                                source_text=source_text,
-                                failed_translation=current,
-                                issues=[i.model_dump() for i in field_qa.issues],
-                                preserve_terms=list(glossary.preserve),
-                            )
-                            current = correction.corrected_text
-                            setattr(rec, f"translated_{field_name}", current)
-                            recheck = qa.assess_record(
-                                record_id=rec.source_record_key,
-                                target_language=language.code,
-                                source_goal=rec.source_goal if field_name != "goal" else source_text,
-                                source_description=rec.source_description
-                                if field_name != "description"
-                                else source_text,
-                                source_kra=rec.source_kra if field_name != "kra" else source_text,
-                                translated_goal=rec.translated_goal,
-                                translated_description=rec.translated_description,
-                                translated_kra=rec.translated_kra,
-                            )
-                        except FoundryProviderError as exc:
-                            logger.warning(
-                                "correction_skipped job_id=%s field=%s error=%s",
-                                job.id,
-                                field_name,
-                                str(exc)[:200],
-                            )
-                            still_failing = True
-                            unresolved_high += 1
-                            db.add(
-                                LocalizationQAResult(
-                                    job_id=job.id,
-                                    record_id=rec.id,
-                                    tenant_id=job.tenant_id,
-                                    field_name=field_name,
-                                    issue_type="FOUNDRY_UNAVAILABLE",
-                                    severity="HIGH",
-                                    original_text=source_text,
-                                    translated_text=getattr(rec, f"translated_{field_name}"),
-                                    explanation=f"Correction skipped due to Foundry error: {str(exc)[:300]}",
-                                )
-                            )
-                            break
-                        field_result = recheck.fields.get(field_name)
-                        if field_result and field_result.status == "PASS":
-                            corrected_count += 1
-                            break
-                    else:
-                        still_failing = True
-                        unresolved_high += sum(
-                            1 for i in field_qa.issues if i.severity == "HIGH"
+                    current = repair_translation(
+                        source_text,
+                        revised.text,
+                        language.azure_translator_code,
+                        glossary.preserve,
+                    )
+                    if source_text.strip() and not current.strip():
+                        continue
+                    setattr(rec, f"translated_{field_name}", current)
+                    changed_fields += 1
+                    corrected_count += 1
+                    db.add(
+                        LocalizationQAResult(
+                            job_id=job.id,
+                            record_id=rec.id,
+                            tenant_id=job.tenant_id,
+                            field_name=field_name,
+                            issue_type="SEMANTIC_REVISION",
+                            severity="LOW",
+                            original_text=source_text,
+                            translated_text=current,
+                            explanation=revised.reason or "Foundry revised the meaning.",
                         )
-                        db.add(
-                            LocalizationQAResult(
-                                job_id=job.id,
-                                record_id=rec.id,
-                                tenant_id=job.tenant_id,
-                                field_name=field_name,
-                                issue_type="NEEDS_HUMAN_REVIEW",
-                                severity="HIGH",
-                                original_text=source_text,
-                                translated_text=getattr(rec, f"translated_{field_name}"),
-                                proposed_correction=getattr(rec, f"translated_{field_name}"),
-                                explanation="Automatic correction exhausted; human review required.",
-                            )
-                        )
-                    attempts[field_name] = attempt_count
-                rec.correction_attempts = attempts
-                if still_failing:
-                    rec.translation_status = LocalizationRecordStatus.needs_human_review
-                    rec.qa_status = "needs_human_review"
-                else:
+                    )
+                if changed_fields:
                     rec.translation_status = LocalizationRecordStatus.corrected
+                    rec.qa_status = "revised"
+                else:
+                    rec.translation_status = LocalizationRecordStatus.qa_pass
                     rec.qa_status = "pass"
             job.cost_estimate = {
                 **dict(job.cost_estimate or {}),

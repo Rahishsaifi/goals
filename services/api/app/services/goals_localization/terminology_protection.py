@@ -28,6 +28,8 @@ _STRUCTURAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"),
     re.compile(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}\b", re.IGNORECASE),
     re.compile(r"(?<![A-Za-z])(?:\$|€|£)?\d{1,3}(?:[, ]\d{3})*(?:\.\d+)?%"),
+    # Hold "By Q2" as one token. Protecting only "Q2" lets Translator turn "By" into 通过 or drop it.
+    re.compile(r"\b[Bb]y\s+Q[1-4]\b"),
     re.compile(r"\bQ[1-4]\b", re.IGNORECASE),
     re.compile(r"\bFY\s*\d{2,4}\b", re.IGNORECASE),
     re.compile(r"\b(?:19|20)\d{2}\b"),

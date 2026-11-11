@@ -6,6 +6,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from app.api.deps import AuthContext, DbSession, require_csrf, require_roles
 from app.goals_localization.language_config import (
@@ -17,6 +18,7 @@ from app.goals_localization.language_config import (
 )
 from app.integrations.storage import BlobStorage
 from app.models.auth import MembershipRole
+from app.models.goals_localization import LocalizationJob, LocalizationJobStatus
 from app.services.goals_localization import job_service
 from app.core.config import get_settings
 from app.services.goals_localization.glossary_store import (
@@ -86,6 +88,59 @@ def get_languages() -> dict[str, object]:
         "stages": list(STAGE_ORDER),
         "qa_modes": list(QA_MODES),
         "default_qa_mode": DEFAULT_QA_MODE,
+    }
+
+
+_ACTIVE_JOBS = (
+    LocalizationJobStatus.uploaded,
+    LocalizationJobStatus.validating,
+    LocalizationJobStatus.reconciling,
+    LocalizationJobStatus.translating,
+    LocalizationJobStatus.semantic_qa,
+    LocalizationJobStatus.correcting,
+    LocalizationJobStatus.technical_qa,
+    LocalizationJobStatus.generating,
+    LocalizationJobStatus.final_validation,
+)
+
+
+@router.get("/queue")
+def get_queue(
+    db: DbSession,
+    auth: Annotated[
+        AuthContext,
+        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer)),
+    ],
+) -> dict[str, object]:
+    if auth.tenant_id is None:
+        raise HTTPException(status_code=403, detail="Tenant context required.")
+    jobs = list(
+        db.scalars(
+            select(LocalizationJob)
+            .where(
+                LocalizationJob.tenant_id == auth.tenant_id,
+                LocalizationJob.status.in_(_ACTIVE_JOBS),
+            )
+            .order_by(LocalizationJob.created_at.asc())
+        )
+    )
+    processing = next((job for job in jobs if job.status != LocalizationJobStatus.uploaded), jobs[0] if jobs else None)
+    waiting = sum(1 for job in jobs if job.status == LocalizationJobStatus.uploaded)
+    return {
+        "busy": processing is not None and processing.status != LocalizationJobStatus.uploaded,
+        "waiting": waiting,
+        "active_count": len(jobs),
+        "processing": None
+        if processing is None or processing.status == LocalizationJobStatus.uploaded
+        else {
+            "id": str(processing.id),
+            "status": processing.status.value,
+            "target_language": processing.target_language,
+            "source_filename": processing.source_filename,
+            "current_stage": processing.current_stage,
+            "processed_records": processing.processed_records,
+            "total_records": processing.total_records,
+        },
     }
 
 

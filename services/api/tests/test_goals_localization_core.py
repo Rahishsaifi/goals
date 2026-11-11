@@ -22,6 +22,10 @@ from app.services.goals_localization.terminology_protection import (
     restore_terminology,
     verify_preserved_terms,
 )
+from app.services.goals_localization.translation_repair import (
+    find_meaning_defects,
+    repair_translation,
+)
 from app.services.goals_localization.untranslated_english import detect_residual_english
 
 
@@ -95,9 +99,60 @@ def test_structural_tokens_are_held_for_translation() -> None:
     source = "Grow 15% by Q4 2026 and close on 2026-03-31"
     protected = protect_structural(source)
     assert "Q4" not in protected.text
+    assert "by " not in protected.text.lower()
     assert "15%" not in protected.text
     assert "2026" not in protected.text
     assert restore_terminology(protected.text, protected.mapping) == source
+
+
+def test_by_quarter_is_repaired_in_chinese_and_german() -> None:
+    source = (
+        "1. By Q2, select a workflow. 2. By Q3, put it into use. "
+        "3. By Q4, demonstrate improvement against the agreed baseline."
+    )
+    chinese = (
+        "1. 通过Q2，选择一个工作流程。2. Q3，将它投入使用。"
+        "3. 通过 Q4，展示改进与约定基线相符的改进。"
+    )
+    repaired = repair_translation(source, chinese, "zh-Hans")
+    assert "通过" not in repaired
+    assert repaired.startswith("1. 在Q2之前")
+    assert "2. 在Q3之前" in repaired
+    assert "3. 在Q4之前" in repaired
+    assert find_meaning_defects(source, repaired, "zh-Hans") == []
+
+    german = "1. Identifizieren Sie Q2 einen wiederkehrenden Schritt."
+    german_source = "1. By Q2, identify a recurring step."
+    fixed = repair_translation(german_source, german, "de")
+    assert fixed.startswith("1. bis Q2 ")
+    assert find_meaning_defects(german_source, fixed, "de") == []
+
+
+def test_meaning_is_not_rewritten_by_a_fixed_phrase_list() -> None:
+    source = "set priorities and clear ownership for simplifying a workflow"
+    translated = "设定优先级并明确所有权，以简化工作流程。"
+    assert repair_translation(source, translated, "zh-Hans") == translated
+
+
+def test_adjacent_preserved_terms_keep_a_space() -> None:
+    source = "Report M&E for Meetings & Events across Energy, Resources & Marine."
+    translated = "报告Meetings & EventsM&E，范围是Energy, Resources & Marine。"
+    repaired = repair_translation(
+        source,
+        translated,
+        "zh-Hans",
+        ("Energy, Resources & Marine", "Meetings & Events", "M&E"),
+    )
+    assert "Meetings & Events M&E" in repaired
+    assert "EventsM&E" not in repaired
+
+
+def test_preserved_term_is_not_glued_to_the_next_word() -> None:
+    source = "Select EBITDA a recurring workflow."
+    translated = "Einen wiederkehrenden Workflow EBITDAauswählen."
+    repaired = repair_translation(source, translated, "de", ("EBITDA",))
+    assert "EBITDA auswählen" in repaired
+    assert "EBITDAauswählen" not in repaired
 
 
 def test_shared_words_are_not_untranslated_english() -> None:

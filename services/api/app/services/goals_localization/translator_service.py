@@ -17,6 +17,7 @@ from app.services.goals_localization.terminology_protection import (
     protect_terminology,
     restore_terminology,
 )
+from app.services.goals_localization.translation_repair import repair_translation
 
 logger = logging.getLogger(__name__)
 
@@ -87,16 +88,17 @@ class AzureTranslatorClient:
         self.region = region
         self.batch_size = max(1, batch_size)
         self.timeout_seconds = timeout_seconds
-        self.chars_per_minute = max(1, chars_per_minute)
-        self.budget = _MinuteCharacterBudget(self.chars_per_minute)
+        # 0 means no app-side character pace. Used for the paid Translator account.
+        self.chars_per_minute = max(0, chars_per_minute)
+        self.budget = _MinuteCharacterBudget(self.chars_per_minute) if self.chars_per_minute else None
         self.fallback = fallback
 
     def _character_chunks(self, items: list[TranslationItem]) -> list[list[TranslationItem]]:
         chunks: list[list[TranslationItem]] = []
         current: list[TranslationItem] = []
         current_chars = 0
-        # Keep each call under both the batch size and the one-minute character budget.
-        max_chars = min(25000, self.chars_per_minute)
+        # Keep each call under the Translator request cap. Free tier also stays inside one minute.
+        max_chars = 45000 if self.chars_per_minute == 0 else min(25000, self.chars_per_minute)
         for item in items:
             size = len(item.text)
             if current and (len(current) >= self.batch_size or current_chars + size > max_chars):
@@ -116,7 +118,8 @@ class AzureTranslatorClient:
             return []
         outputs: list[TranslationResult] = []
         for chunk in self._character_chunks(items):
-            self.budget.acquire(sum(len(item.text) for item in chunk))
+            if self.budget is not None:
+                self.budget.acquire(sum(len(item.text) for item in chunk))
             outputs.extend(self._translate_chunk(chunk, to_language=to_language, from_language=from_language))
         return outputs
 
@@ -166,9 +169,19 @@ class AzureTranslatorClient:
                     )
                     continue
                 if response.status_code >= 400:
-                    raise TranslatorError(
+                    error = TranslatorError(
                         f"Translator HTTP {response.status_code}: {response.text[:500]}"
                     )
+                    if self.fallback is not None and response.status_code in {401, 403, 429}:
+                        logger.warning(
+                            "translator_paid_fallback status=%s to_language=%s",
+                            response.status_code,
+                            to_language,
+                        )
+                        return self.fallback._translate_chunk(
+                            chunk, to_language=to_language, from_language=from_language
+                        )
+                    raise error
                 payload = response.json()
                 if not isinstance(payload, list) or len(payload) != len(chunk):
                     raise TranslatorError("Translator returned unexpected payload shape.")
@@ -218,13 +231,11 @@ class CachedTranslator:
 
         Protects approved terminology with placeholders before Translator, then restores.
         """
-        pending: list[TranslationItem] = []
         resolved: dict[str, dict[str, str]] = {
             row["id"]: {"goal": "", "description": "", "kra": ""} for row in records
         }
-        # item_id, field, source_text, placeholder_mapping
-        meta: list[tuple[str, str, str, dict[str, str]]] = []
-
+        # One Translator call per distinct source text. Every row that repeats it reuses the result.
+        groups: dict[str, dict[str, object]] = {}
         for row in records:
             rid = row["id"]
             for field in ("goal", "description", "kra"):
@@ -242,42 +253,73 @@ class CachedTranslator:
                     )
                 )
                 if cached is not None:
-                    resolved[rid][field] = cached.translated_text
+                    fixed = repair_translation(
+                        source, cached.translated_text, to_language, preserve_terms
+                    )
+                    if fixed != cached.translated_text:
+                        cached.translated_text = fixed
+                    resolved[rid][field] = fixed
                     self.cache_hits += 1
                     continue
-                structural = protect_structural(source)
-                protected = protect_terminology(structural.text, terms=preserve_terms)
-                mapping = {**structural.mapping, **protected.mapping}
-                item_id = f"{rid}::{field}"
-                pending.append(TranslationItem(item_id=item_id, text=protected.text))
-                meta.append((item_id, field, source, mapping))
+                group = groups.get(digest)
+                if group is None:
+                    structural = protect_structural(source)
+                    protected = protect_terminology(structural.text, terms=preserve_terms)
+                    group = {
+                        "source": source,
+                        "protected": protected.text,
+                        "mapping": {**structural.mapping, **protected.mapping},
+                        "targets": [],
+                    }
+                    groups[digest] = group
+                targets = group["targets"]
+                assert isinstance(targets, list)
+                targets.append((rid, field))
 
-        pending_ids = {item_id.split("::", 1)[0] for item_id, _, _, _ in meta}
-        done_ids = {rid for rid in resolved if rid not in pending_ids}
+        remaining: dict[str, int] = {}
+        for group in groups.values():
+            targets = group["targets"]
+            assert isinstance(targets, list)
+            for rid, _field in targets:
+                remaining[rid] = remaining.get(rid, 0) + 1
 
         def report() -> None:
             if on_progress is not None:
-                on_progress(len(done_ids))
+                on_progress(len(resolved) - len(remaining))
 
         report()
-        if pending:
+        if groups:
+            pending = [
+                TranslationItem(item_id=digest, text=str(group["protected"]))
+                for digest, group in groups.items()
+            ]
             self.characters_sent += sum(len(item.text) for item in pending)
-            meta_by_id = {item_id: (field, source, mapping) for item_id, field, source, mapping in meta}
-            batch = self.client.batch_size
+            batch = max(1, self.client.batch_size)
             for start in range(0, len(pending), batch):
                 chunk = pending[start : start + batch]
-                translated = self.client.translate_batch(items=chunk, to_language=to_language)
-                by_id = {item.item_id: item.text for item in translated}
+                translated = {
+                    item.item_id: item.text
+                    for item in self.client.translate_batch(items=chunk, to_language=to_language)
+                }
                 for item in chunk:
-                    field, source, mapping = meta_by_id[item.item_id]
-                    text = restore_terminology(by_id.get(item.item_id, ""), mapping)
+                    group = groups[item.item_id]
+                    source = str(group["source"])
+                    mapping = group["mapping"]
+                    assert isinstance(mapping, dict)
+                    text = restore_terminology(translated.get(item.item_id, ""), mapping)
                     text = apply_preserve_terms(source, text, preserve_terms)
-                    rid, _ = item.item_id.split("::", 1)
-                    resolved[rid][field] = text
+                    text = repair_translation(source, text, to_language, preserve_terms)
+                    targets = group["targets"]
+                    assert isinstance(targets, list)
+                    for rid, field in targets:
+                        resolved[rid][field] = text
+                        remaining[rid] -= 1
+                        if remaining[rid] <= 0:
+                            remaining.pop(rid, None)
                     self.db.add(
                         TranslationCacheEntry(
                             tenant_id=self.tenant_id,
-                            source_hash=source_hash(source),
+                            source_hash=item.item_id,
                             target_language=to_language,
                             glossary_version=glossary_version,
                             source_text=source,
@@ -285,10 +327,6 @@ class CachedTranslator:
                         )
                     )
                 self.db.flush()
-                for item in chunk:
-                    rid, _ = item.item_id.split("::", 1)
-                    if rid not in {other.split("::", 1)[0] for other, _, _, _ in meta[start + len(chunk) :]}:
-                        done_ids.add(rid)
                 report()
         return resolved
 
@@ -320,7 +358,7 @@ def build_translator_client(
             api_key=paid_key,
             region=paid_region,
             batch_size=batch_size,
-            chars_per_minute=2_000_000,
+            chars_per_minute=0,
         )
     return AzureTranslatorClient(
         endpoint=endpoint,
