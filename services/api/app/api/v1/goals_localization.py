@@ -4,7 +4,7 @@ import uuid
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
@@ -476,11 +476,8 @@ def get_report(
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     if not job.report_blob_name:
         raise HTTPException(status_code=404, detail="QA report not available yet.")
-    data = _storage().download_bytes(container=CONTAINER, blob_name=job.report_blob_name)
-    return Response(
-        content=data,
-        media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="qa_report_{job.id}.json"'},
+    return _blob_redirect(
+        job.report_blob_name, f"qa_report_{job.id}.json", "application/json"
     )
 
 
@@ -501,14 +498,21 @@ def download_workbook(
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     if not job.output_blob_name:
         raise HTTPException(status_code=404, detail="Workbook not available yet.")
-    data = _storage().download_bytes(container=CONTAINER, blob_name=job.output_blob_name)
     label = "PRODUCTION" if job.production_ready else "NOT_PRODUCTION_READY"
-    filename = f"Goals_{job.target_language}_{label}.xlsx"
-    return Response(
-        content=data,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    return _blob_redirect(
+        job.output_blob_name,
+        f"Goals_{job.target_language}_{label}.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+def _blob_redirect(blob_name: str, filename: str, content_type: str) -> RedirectResponse:
+    # Large files stall when streamed back through the web proxy, so the browser
+    # downloads directly from storage with a short-lived read-only link.
+    url = _storage().create_download_url(
+        container=CONTAINER, blob_name=blob_name, filename=filename, content_type=content_type
+    )
+    return RedirectResponse(url, status_code=307, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/jobs/{job_id}/issues")

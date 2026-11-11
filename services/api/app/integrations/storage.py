@@ -96,6 +96,28 @@ class BlobStorage:
             container=container, blob_name=blob_name, upload_url=url, expires_at=expires
         )
 
+    def create_download_url(
+        self,
+        *,
+        container: str,
+        blob_name: str,
+        filename: str,
+        content_type: str,
+        ttl_minutes: int = 10,
+    ) -> str:
+        sas = generate_blob_sas(
+            account_name=self.account_name,
+            container_name=container,
+            blob_name=blob_name,
+            account_key=self.account_key,
+            permission=BlobSasPermissions(read=True),
+            expiry=datetime.now(UTC) + timedelta(minutes=ttl_minutes),
+            content_disposition=f'attachment; filename="{filename}"',
+            content_type=content_type,
+        )
+        encoded_blob = quote(blob_name, safe="/")
+        return f"{self.blob_endpoint}/{container}/{encoded_blob}?{sas}"
+
     def download_bytes(self, *, container: str, blob_name: str) -> bytes:
         blob = self._client.get_blob_client(container=container, blob=blob_name)
         return blob.download_blob().readall()
