@@ -33,7 +33,8 @@ def detect_residual_english(
     for match in _PHRASE_RE.finditer(source):
         phrase = match.group(0)
         words = phrase.split()
-        if all(word.lower() in allow for word in words):
+        # Allow English / Preserve may be whole phrases ("Mission Possible") or single tokens.
+        if phrase.lower() in allow or all(word.lower() in allow for word in words):
             continue
         if phrase.lower() in translated.lower():
             hits.append(

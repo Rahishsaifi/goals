@@ -128,6 +128,46 @@ def test_by_quarter_is_repaired_in_chinese_and_german() -> None:
     assert find_meaning_defects(german_source, fixed, "de") == []
 
 
+def test_preserve_protects_allow_english_only_skips_residual_qa() -> None:
+    """Preserve protects tokens. Allow English must not be protected or restored."""
+    from app.services.goals_localization.glossary_store import GlossaryTerm, _snapshot
+
+    snap = _snapshot(
+        [
+            GlossaryTerm(term="TripSource", action="preserve"),
+            GlossaryTerm(term="Client Delivery Quality", action="allow"),
+        ]
+    )
+    assert snap.preserve == ("TripSource",)
+    assert "Client Delivery Quality" not in snap.preserve
+    assert "TripSource" in snap.allow
+    assert "Client Delivery Quality" in snap.allow
+
+    source = "Improve TripSource and Client Delivery Quality across teams"
+    protected = protect_terminology(source, terms=snap.preserve)
+    assert "TripSource" not in protected.text
+    assert "__KEEP_" in protected.text
+    assert "Client Delivery Quality" in protected.text
+
+    # Allow English phrase left in English is not flagged; other English phrases are.
+    hits = detect_residual_english(
+        field="goal",
+        source=source,
+        translated="Improve TripSource and Client Delivery Quality across teams",
+        target_language="zh",
+        allowlist=snap.allow,
+    )
+    assert all(hit.token != "Client Delivery Quality" for hit in hits)
+    flagged = detect_residual_english(
+        field="goal",
+        source="Improve client program delivery across teams",
+        translated="Improve client program delivery across teams",
+        target_language="zh",
+        allowlist=snap.allow,
+    )
+    assert flagged
+
+
 def test_meaning_is_not_rewritten_by_a_fixed_phrase_list() -> None:
     source = "set priorities and clear ownership for simplifying a workflow"
     translated = "设定优先级并明确所有权，以简化工作流程。"

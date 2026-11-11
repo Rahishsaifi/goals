@@ -229,7 +229,8 @@ class CachedTranslator:
     ) -> dict[str, dict[str, str]]:
         """records: [{id, goal, description, kra}] -> {id: {goal, description, kra}}
 
-        Protects approved terminology with placeholders before Translator, then restores.
+        Protects Preserve terms only. Allow English terms are translated normally and are
+        only excluded later by residual-English QA.
         """
         resolved: dict[str, dict[str, str]] = {
             row["id"]: {"goal": "", "description": "", "kra": ""} for row in records

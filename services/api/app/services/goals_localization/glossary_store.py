@@ -28,7 +28,9 @@ class GlossaryTerm:
 @dataclass(frozen=True)
 class GlossarySnapshot:
     terms: tuple[GlossaryTerm, ...]
+    # Preserve: protect/restore exact tokens. Never send these through Translator as normal text.
     preserve: tuple[str, ...]
+    # Residual-English allowlist: Preserve ∪ Allow English. Allow English is NOT protected.
     allow: frozenset[str]
     cache_version: str
 
@@ -42,13 +44,15 @@ def default_terms() -> list[GlossaryTerm]:
 
 
 def _snapshot(terms: list[GlossaryTerm]) -> GlossarySnapshot:
+    # Keep the two actions separate. Preserve protects; Allow English only skips residual QA.
     preserve = tuple(term.term for term in terms if term.action == "preserve")
-    allow = frozenset(term.term for term in terms)
-    digest = hashlib.sha256("|".join(sorted(allow, key=str.lower)).encode()).hexdigest()[:12]
+    allow_english = tuple(term.term for term in terms if term.action == "allow")
+    residual_allow = frozenset((*preserve, *allow_english))
+    digest = hashlib.sha256("|".join(sorted(residual_allow, key=str.lower)).encode()).hexdigest()[:12]
     return GlossarySnapshot(
         terms=tuple(terms),
         preserve=preserve,
-        allow=allow,
+        allow=residual_allow,
         cache_version=f"{GLOSSARY_VERSION}-{digest}",
     )
 

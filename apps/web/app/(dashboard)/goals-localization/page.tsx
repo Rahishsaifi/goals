@@ -868,7 +868,7 @@ export default function GoalsLocalizationPage() {
               </div>
               {glossaryNote ? <p className="mt-1 text-[11px] text-slate-500">{glossaryNote}</p> : null}
               <p className="mt-1 text-[11px] leading-4 text-slate-400">
-                Preserve keeps the term unchanged. Allow English stops it being flagged as untranslated.
+                Preserve keeps the exact term untranslated. Allow English may be translated; leftover English for that term is not flagged.
               </p>
             </div>
 
