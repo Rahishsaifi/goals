@@ -71,8 +71,24 @@ def run_once(session_factory: sessionmaker[Session], settings: WorkerSettings) -
                     event_db, run_id=run_id, provider=provider
                 )
             elif locked.event_type == "goals.localization.run":
+                from app.models.goals_localization import LocalizationJob, LocalizationJobStatus
+
                 job_id = uuid.UUID(str(locked.payload["job_id"]))
-                process_localization_job(event_db, job_id=job_id, storage=storage)
+                job = event_db.get(LocalizationJob, job_id)
+                if job is not None and job.status == LocalizationJobStatus.cancelled:
+                    print(
+                        json.dumps(
+                            {
+                                "component": "worker",
+                                "status": "skipped_cancelled",
+                                "event_id": str(locked.id),
+                                "job_id": str(job_id),
+                            }
+                        ),
+                        flush=True,
+                    )
+                else:
+                    process_localization_job(event_db, job_id=job_id, storage=storage)
             processing_service.mark_processed(event_db, locked)
             event_db.commit()
             processed += 1

@@ -25,6 +25,18 @@ from app.services.goals_localization.pipeline import CONTAINER
 
 EVENT_TYPE = "goals.localization.run"
 
+ACTIVE_JOB_STATUSES = (
+    LocalizationJobStatus.uploaded,
+    LocalizationJobStatus.validating,
+    LocalizationJobStatus.reconciling,
+    LocalizationJobStatus.translating,
+    LocalizationJobStatus.semantic_qa,
+    LocalizationJobStatus.correcting,
+    LocalizationJobStatus.technical_qa,
+    LocalizationJobStatus.generating,
+    LocalizationJobStatus.final_validation,
+)
+
 
 class GoalsLocalizationError(Exception):
     def __init__(self, code: str, message: str, status_code: int = 400) -> None:
@@ -32,6 +44,54 @@ class GoalsLocalizationError(Exception):
         self.code = code
         self.message = message
         self.status_code = status_code
+
+
+def tenant_has_active_job(db: Session, *, tenant_id: uuid.UUID) -> LocalizationJob | None:
+    return db.scalar(
+        select(LocalizationJob)
+        .where(
+            LocalizationJob.tenant_id == tenant_id,
+            LocalizationJob.status.in_(ACTIVE_JOB_STATUSES),
+        )
+        .order_by(LocalizationJob.created_at.asc())
+        .limit(1)
+    )
+
+
+def clear_active_jobs(db: Session, *, tenant_id: uuid.UUID) -> list[LocalizationJob]:
+    """Cancel every in-flight / waiting Goals job and drop matching outbox work."""
+    jobs = list(
+        db.scalars(
+            select(LocalizationJob).where(
+                LocalizationJob.tenant_id == tenant_id,
+                LocalizationJob.status.in_(ACTIVE_JOB_STATUSES),
+            )
+        )
+    )
+    if not jobs:
+        return []
+    now = datetime.now(UTC)
+    job_ids = [job.id for job in jobs]
+    for job in jobs:
+        job.status = LocalizationJobStatus.cancelled
+        job.current_stage = None
+        job.error_message = "Cleared from the worker queue."
+        job.completed_at = now
+    events = list(
+        db.scalars(
+            select(OutboxEvent).where(
+                OutboxEvent.tenant_id == tenant_id,
+                OutboxEvent.event_type == EVENT_TYPE,
+                OutboxEvent.aggregate_type == "localization_job",
+                OutboxEvent.aggregate_id.in_(job_ids),
+                OutboxEvent.processed_at.is_(None),
+            )
+        )
+    )
+    for event in events:
+        event.processed_at = now
+    db.flush()
+    return jobs
 
 
 def create_job_from_uploads(
@@ -46,6 +106,12 @@ def create_job_from_uploads(
     storage: BlobStorage | None = None,
 ) -> LocalizationJob:
     settings = get_settings()
+    if tenant_has_active_job(db, tenant_id=tenant_id) is not None:
+        raise GoalsLocalizationError(
+            "queue_busy",
+            "Another Goals file is already in the worker. Wait for it to finish, or clear the queue first.",
+            409,
+        )
     try:
         language = resolve_language(target_language)
     except ValueError as exc:

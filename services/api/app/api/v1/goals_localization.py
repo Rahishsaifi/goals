@@ -98,19 +98,6 @@ def get_languages() -> dict[str, object]:
     }
 
 
-_ACTIVE_JOBS = (
-    LocalizationJobStatus.uploaded,
-    LocalizationJobStatus.validating,
-    LocalizationJobStatus.reconciling,
-    LocalizationJobStatus.translating,
-    LocalizationJobStatus.semantic_qa,
-    LocalizationJobStatus.correcting,
-    LocalizationJobStatus.technical_qa,
-    LocalizationJobStatus.generating,
-    LocalizationJobStatus.final_validation,
-)
-
-
 @router.get("/queue")
 def get_queue(
     db: DbSession,
@@ -126,19 +113,20 @@ def get_queue(
             select(LocalizationJob)
             .where(
                 LocalizationJob.tenant_id == auth.tenant_id,
-                LocalizationJob.status.in_(_ACTIVE_JOBS),
+                LocalizationJob.status.in_(job_service.ACTIVE_JOB_STATUSES),
             )
             .order_by(LocalizationJob.created_at.asc())
         )
     )
-    processing = next((job for job in jobs if job.status != LocalizationJobStatus.uploaded), jobs[0] if jobs else None)
+    processing = next((job for job in jobs if job.status != LocalizationJobStatus.uploaded), None)
     waiting = sum(1 for job in jobs if job.status == LocalizationJobStatus.uploaded)
+    # One file at a time: any active/waiting job blocks a new start.
     return {
-        "busy": processing is not None and processing.status != LocalizationJobStatus.uploaded,
+        "busy": len(jobs) > 0,
         "waiting": waiting,
         "active_count": len(jobs),
         "processing": None
-        if processing is None or processing.status == LocalizationJobStatus.uploaded
+        if processing is None
         else {
             "id": str(processing.id),
             "status": processing.status.value,
@@ -148,6 +136,25 @@ def get_queue(
             "processed_records": processing.processed_records,
             "total_records": processing.total_records,
         },
+    }
+
+
+@router.post("/queue/clear")
+def clear_queue(
+    db: DbSession,
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    _: Annotated[
+        AuthContext,
+        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter)),
+    ],
+) -> dict[str, object]:
+    if auth.tenant_id is None:
+        raise HTTPException(status_code=403, detail="Tenant context required.")
+    cleared = job_service.clear_active_jobs(db, tenant_id=auth.tenant_id)
+    db.commit()
+    return {
+        "cleared": len(cleared),
+        "job_ids": [str(job.id) for job in cleared],
     }
 
 
