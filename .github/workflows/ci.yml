@@ -7,6 +7,22 @@ on:
 jobs:
   python:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: recruitment
+          POSTGRES_PASSWORD: recruitment
+          POSTGRES_DB: recruitment
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U recruitment -d recruitment"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://recruitment:recruitment@localhost:5432/recruitment
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
