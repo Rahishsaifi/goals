@@ -19,6 +19,11 @@ from app.integrations.model_provider import (
 logger = logging.getLogger(__name__)
 
 
+def _weight(criterion: dict[str, object]) -> float:
+    value = criterion.get("weight")
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
 class FoundryProviderError(RuntimeError):
     """Raised when a live Foundry/OpenAI call fails. Never fall back to mock."""
 
@@ -123,16 +128,16 @@ class FoundryModelProvider:
                     "description": str(item.get("description", "")),
                 }
             )
-        total = sum(float(c["weight"]) for c in normalized)
+        total = sum(_weight(c) for c in normalized)
         if abs(total - 100.0) > 0.01:
             # Keep deterministic scoring valid without inventing criteria content.
             scale = 100.0 / total if total > 0 else 0.0
             if scale <= 0:
                 raise FoundryProviderError("Foundry JD weights were invalid.")
             for criterion in normalized:
-                criterion["weight"] = round(float(criterion["weight"]) * scale, 4)
-            drift = 100.0 - sum(float(c["weight"]) for c in normalized)
-            normalized[0]["weight"] = round(float(normalized[0]["weight"]) + drift, 4)
+                criterion["weight"] = round(_weight(criterion) * scale, 4)
+            drift = 100.0 - sum(_weight(c) for c in normalized)
+            normalized[0]["weight"] = round(_weight(normalized[0]) + drift, 4)
         return ProviderResult(value=normalized, usage=payload["usage"])
 
     def assess_criteria_from_profile(

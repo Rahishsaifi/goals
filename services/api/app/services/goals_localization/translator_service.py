@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -93,7 +94,9 @@ class AzureTranslatorClient:
         self.timeout_seconds = timeout_seconds
         # 0 means no app-side character pace. Used for the paid Translator account.
         self.chars_per_minute = max(0, chars_per_minute)
-        self.budget = _MinuteCharacterBudget(self.chars_per_minute) if self.chars_per_minute else None
+        self.budget = (
+            _MinuteCharacterBudget(self.chars_per_minute) if self.chars_per_minute else None
+        )
         self.fallback = fallback
         # (level, message) sink for the job activity log.
         self.notify: Callable[[str, str], None] | None = None
@@ -142,7 +145,9 @@ class AzureTranslatorClient:
         for chunk in self._character_chunks(items):
             if self.budget is not None:
                 self.budget.acquire(sum(len(item.text) for item in chunk))
-            outputs.extend(self._translate_chunk(chunk, to_language=to_language, from_language=from_language))
+            outputs.extend(
+                self._translate_chunk(chunk, to_language=to_language, from_language=from_language)
+            )
         return outputs
 
     def _translate_chunk(
@@ -248,7 +253,7 @@ class AzureTranslatorClient:
 
 
 class CachedTranslator:
-    def __init__(self, client: AzureTranslatorClient, db: Session, *, tenant_id) -> None:
+    def __init__(self, client: AzureTranslatorClient, db: Session, *, tenant_id: uuid.UUID) -> None:
         self.client = client
         self.db = db
         self.tenant_id = tenant_id
@@ -385,7 +390,8 @@ def build_translator_client(
     if paid_only:
         if not paid_endpoint or not paid_key:
             raise TranslatorError(
-                "AZURE_TRANSLATOR_PAID_ONLY is on, but AZURE_TRANSLATOR_PAID_ENDPOINT and AZURE_TRANSLATOR_PAID_KEY are not set."
+                "AZURE_TRANSLATOR_PAID_ONLY is on, but AZURE_TRANSLATOR_PAID_ENDPOINT "
+                "and AZURE_TRANSLATOR_PAID_KEY are not set."
             )
         return AzureTranslatorClient(
             endpoint=paid_endpoint,
@@ -396,13 +402,15 @@ def build_translator_client(
         )
     if not endpoint or not api_key:
         raise TranslatorError(
-            "Azure Translator is not configured. Set AZURE_TRANSLATOR_ENDPOINT and AZURE_TRANSLATOR_KEY."
+            "Azure Translator is not configured. "
+            "Set AZURE_TRANSLATOR_ENDPOINT and AZURE_TRANSLATOR_KEY."
         )
     fallback = None
     if paid_fallback:
         if not paid_endpoint or not paid_key:
             raise TranslatorError(
-                "Paid Translator fallback is enabled, but AZURE_TRANSLATOR_PAID_ENDPOINT and AZURE_TRANSLATOR_PAID_KEY are not set."
+                "Paid Translator fallback is enabled, but AZURE_TRANSLATOR_PAID_ENDPOINT "
+                "and AZURE_TRANSLATOR_PAID_KEY are not set."
             )
         fallback = AzureTranslatorClient(
             endpoint=paid_endpoint,

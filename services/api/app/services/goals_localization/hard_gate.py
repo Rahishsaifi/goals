@@ -17,33 +17,49 @@ class HardGateResult:
     checks: list[GateCheck] = field(default_factory=list)
 
 
+def _count(value: object) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float, str)):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
 def evaluate_hard_gate(summary: dict[str, object]) -> HardGateResult:
     checks: list[GateCheck] = []
 
     def add(name: str, required: str, actual: object, passed: bool) -> None:
         checks.append(GateCheck(name=name, required=required, actual=str(actual), passed=passed))
 
-    source_count = int(summary.get("source_record_count") or 0)
-    output_count = int(summary.get("output_record_count") or 0)
-    unmatched = int(summary.get("unmatched_records") or 0)
-    duplicates = int(summary.get("duplicate_records") or 0)
-    missing_tech = int(summary.get("missing_technical_fields") or 0)
-    blank_goal = int(summary.get("blank_goal_violations") or 0)
-    blank_desc = int(summary.get("blank_description_violations") or 0)
-    blank_kra = int(summary.get("blank_kra_violations") or 0)
-    numeric = int(summary.get("numeric_discrepancies") or 0)
-    percent = int(summary.get("percentage_discrepancies") or 0)
-    quarters = int(summary.get("quarter_discrepancies") or 0)
-    dates = int(summary.get("date_discrepancies") or 0)
-    unresolved_high = int(summary.get("unresolved_high_severity_issues") or 0)
-    unresolved_terms = int(summary.get("unresolved_terminology_issues") or 0)
+    source_count = _count(summary.get("source_record_count"))
+    output_count = _count(summary.get("output_record_count"))
+    unmatched = _count(summary.get("unmatched_records"))
+    duplicates = _count(summary.get("duplicate_records"))
+    missing_tech = _count(summary.get("missing_technical_fields"))
+    blank_goal = _count(summary.get("blank_goal_violations"))
+    blank_desc = _count(summary.get("blank_description_violations"))
+    blank_kra = _count(summary.get("blank_kra_violations"))
+    numeric = _count(summary.get("numeric_discrepancies"))
+    percent = _count(summary.get("percentage_discrepancies"))
+    quarters = _count(summary.get("quarter_discrepancies"))
+    dates = _count(summary.get("date_discrepancies"))
+    unresolved_high = _count(summary.get("unresolved_high_severity_issues"))
+    unresolved_terms = _count(summary.get("unresolved_terminology_issues"))
     hotel_pass = bool(summary.get("hotel_revenue_growth_qa_pass"))
     ops_pass = bool(summary.get("operational_productivity_qa_pass"))
     workbook_ok = bool(summary.get("workbook_post_save_integrity"))
-    unresolved_english = int(summary.get("unresolved_untranslated_english") or 0)
+    unresolved_english = _count(summary.get("unresolved_untranslated_english"))
 
     add("Source record count", "reported", source_count, source_count > 0)
-    add("Output record count", "equal to source", output_count, output_count == source_count and source_count > 0)
+    add(
+        "Output record count",
+        "equal to source",
+        output_count,
+        output_count == source_count and source_count > 0,
+    )
     add("Unmatched records", "0", unmatched, unmatched == 0)
     add("Duplicate records", "0", duplicates, duplicates == 0)
     add("Missing technical fields", "0 where English has value", missing_tech, missing_tech == 0)

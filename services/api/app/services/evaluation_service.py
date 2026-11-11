@@ -264,7 +264,9 @@ def create_evaluation_run(
             "scoring_algorithm_version": version.scoring_algorithm_version,
             "job_profile_version_id": str(version.id),
             "job_profile_id": str(version.job_profile_id),
-            "job_title": profile_for_title.title if profile_for_title is not None else "Unknown role",
+            "job_title": (
+                profile_for_title.title if profile_for_title is not None else "Unknown role"
+            ),
             "resume_ids": selected_resume_ids,
         },
         model_provider=provider_name,

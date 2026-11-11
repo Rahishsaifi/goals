@@ -79,7 +79,7 @@ def read_template_workbook(data: bytes) -> TemplateWorkbookInfo:
         if key in seen:
             raise ValueError(f"Duplicate target record key '{key}' at row {row_idx}.")
         seen.add(key)
-        technical = {
+        technical: dict[str, str] = {
             name: mapped.get(name, "")
             for name in (
                 "JobLevelCode",

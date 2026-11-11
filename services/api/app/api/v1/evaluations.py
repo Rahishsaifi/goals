@@ -176,7 +176,9 @@ def get_results(
             )
         )
         evidence_by_key = {row.criterion_key: row for row in evidence_rows}
-        criterion_scores = result.criterion_scores if isinstance(result.criterion_scores, list) else []
+        criterion_scores = (
+            result.criterion_scores if isinstance(result.criterion_scores, list) else []
+        )
         breakdown: list[dict[str, object]] = []
         for item in criterion_scores:
             if not isinstance(item, dict):
@@ -208,7 +210,10 @@ def get_results(
                 "review_required": result.review_required,
                 "criterion_scores": result.criterion_scores,
                 "score_breakdown": breakdown,
-                "scoring_formula": "contribution = weight × criterion_score ÷ 100; overall = sum(contributions)",
+                "scoring_formula": (
+                    "contribution = weight × criterion_score ÷ 100; "
+                    "overall = sum(contributions)"
+                ),
             }
         )
     return payload

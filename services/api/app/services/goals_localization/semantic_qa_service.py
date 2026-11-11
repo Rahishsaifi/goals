@@ -10,9 +10,10 @@ from pydantic import BaseModel, Field
 from app.integrations.foundry_provider import FoundryModelProvider, FoundryProviderError
 
 logger = logging.getLogger(__name__)
-_PROMPT_PATH = Path(__file__).resolve().parents[2] / "goals_localization" / "prompts" / "semantic_translation_qa.txt"
-_CORRECTION_PATH = Path(__file__).resolve().parents[2] / "goals_localization" / "prompts" / "translation_correction.txt"
-_REVISION_PATH = Path(__file__).resolve().parents[2] / "goals_localization" / "prompts" / "semantic_revision.txt"
+_PROMPTS_DIR = Path(__file__).resolve().parents[2] / "goals_localization" / "prompts"
+_PROMPT_PATH = _PROMPTS_DIR / "semantic_translation_qa.txt"
+_CORRECTION_PATH = _PROMPTS_DIR / "translation_correction.txt"
+_REVISION_PATH = _PROMPTS_DIR / "semantic_revision.txt"
 
 
 class QAIssue(BaseModel):

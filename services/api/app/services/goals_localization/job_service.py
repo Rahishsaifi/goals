@@ -15,7 +15,11 @@ from app.goals_localization.language_config import (
 )
 from app.integrations.storage import BlobStorage
 from app.models.domain import OutboxEvent
-from app.models.goals_localization import LocalizationJob, LocalizationJobStatus, LocalizationQAResult
+from app.models.goals_localization import (
+    LocalizationJob,
+    LocalizationJobStatus,
+    LocalizationQAResult,
+)
 from app.services.goals_localization.csv_reader import read_english_csv
 from app.services.goals_localization.excel_generator import build_workbook_from_sources
 from app.services.goals_localization.file_validation import (
@@ -124,7 +128,8 @@ def create_job_from_uploads(
     if tenant_has_active_job(db, tenant_id=tenant_id) is not None:
         raise GoalsLocalizationError(
             "queue_busy",
-            "Another Goals file is already in the worker. Wait for it to finish, or clear the queue first.",
+            "Another Goals file is already in the worker. "
+            "Wait for it to finish, or clear the queue first.",
             409,
         )
     try:
@@ -147,7 +152,9 @@ def create_job_from_uploads(
     try:
         sources = read_english_csv(english.data)
     except Exception as exc:
-        raise GoalsLocalizationError("invalid_file", f"Could not parse English CSV: {exc}", 400) from exc
+        raise GoalsLocalizationError(
+            "invalid_file", f"Could not parse English CSV: {exc}", 400
+        ) from exc
     if not sources:
         raise GoalsLocalizationError("invalid_file", "English CSV has no goal records.", 400)
 
@@ -172,7 +179,7 @@ def create_job_from_uploads(
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    options = {key: True for key in MANDATORY_OPTIONS}
+    options: dict[str, object] = {key: True for key in MANDATORY_OPTIONS}
     options["qa_mode"] = mode
     options["run_semantic_qa"] = mode == "foundry"
     job = LocalizationJob(
@@ -194,7 +201,8 @@ def create_job_from_uploads(
     )
     log_job_event(
         job,
-        f"Uploaded {english.filename} ({len(sources):,} rows) for {language.name}. Waiting for the worker.",
+        f"Uploaded {english.filename} ({len(sources):,} rows) for {language.name}. "
+        "Waiting for the worker.",
     )
     db.add(job)
     db.add(
@@ -233,7 +241,9 @@ def get_job(db: Session, *, tenant_id: uuid.UUID, job_id: uuid.UUID) -> Localiza
     return job
 
 
-def list_open_issues(db: Session, *, tenant_id: uuid.UUID, job_id: uuid.UUID) -> list[LocalizationQAResult]:
+def list_open_issues(
+    db: Session, *, tenant_id: uuid.UUID, job_id: uuid.UUID
+) -> list[LocalizationQAResult]:
     get_job(db, tenant_id=tenant_id, job_id=job_id)
     return list(
         db.scalars(
@@ -257,9 +267,13 @@ def review_issue(
     edited_text: str | None = None,
 ) -> LocalizationQAResult:
     if status not in {"approved", "rejected", "edited"}:
-        raise GoalsLocalizationError("invalid_status", "reviewer_status must be approved|rejected|edited.")
+        raise GoalsLocalizationError(
+            "invalid_status", "reviewer_status must be approved|rejected|edited."
+        )
     if not justification.strip():
-        raise GoalsLocalizationError("justification_required", "Reviewer justification is required.")
+        raise GoalsLocalizationError(
+            "justification_required", "Reviewer justification is required."
+        )
     get_job(db, tenant_id=tenant_id, job_id=job_id)
     issue = db.scalar(
         select(LocalizationQAResult).where(

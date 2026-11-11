@@ -6,6 +6,10 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, Field
 
 
+def _as_list(value: object) -> list[object]:
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
 class ExtractedProfile(BaseModel):
     full_name: str | None = None
     email: str | None = None
@@ -157,11 +161,11 @@ class MockModelProvider:
         haystack = " ".join(
             [
                 str(profile.get("summary") or ""),
-                " ".join(str(item) for item in profile.get("skills") or []),
-                " ".join(str(item) for item in profile.get("job_titles") or []),
-                " ".join(str(item) for item in profile.get("employers") or []),
-                " ".join(str(item) for item in profile.get("qualifications") or []),
-                " ".join(str(item) for item in profile.get("evidence_passages") or []),
+                " ".join(str(item) for item in _as_list(profile.get("skills"))),
+                " ".join(str(item) for item in _as_list(profile.get("job_titles"))),
+                " ".join(str(item) for item in _as_list(profile.get("employers"))),
+                " ".join(str(item) for item in _as_list(profile.get("qualifications"))),
+                " ".join(str(item) for item in _as_list(profile.get("evidence_passages"))),
             ]
         ).lower()
         keywords = {

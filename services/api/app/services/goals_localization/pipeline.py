@@ -11,11 +11,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import get_settings
-from app.services.goals_localization.glossary_store import (
-    load_glossary,
-    load_semantic_prompt,
-    paid_translator_enabled,
-)
 from app.goals_localization.language_config import resolve_language, resolve_qa_mode
 from app.integrations.foundry_provider import FoundryProviderError
 from app.integrations.storage import BlobStorage
@@ -35,6 +30,11 @@ from app.services.goals_localization.excel_generator import (
     reconstruct_workbook,
 )
 from app.services.goals_localization.excel_reader import read_template_workbook
+from app.services.goals_localization.glossary_store import (
+    load_glossary,
+    load_semantic_prompt,
+    paid_translator_enabled,
+)
 from app.services.goals_localization.hard_gate import evaluate_hard_gate
 from app.services.goals_localization.numeric_validator import compare_numeric_fields
 from app.services.goals_localization.qa_report_generator import build_qa_report
@@ -79,7 +79,8 @@ def log_job_event(job: LocalizationJob, message: str, level: str = "info") -> No
     last = events[-1] if events else None
     if last and last.get("message") == message and last.get("level") == level:
         merged = dict(last)
-        merged["count"] = int(merged.get("count") or 1) + 1
+        count = merged.get("count")
+        merged["count"] = (count if isinstance(count, int) else 1) + 1
         merged["at"] = now
         events[-1] = merged
     else:
@@ -133,7 +134,9 @@ def _set_stage(
     db.refresh(job)
 
 
-def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobStorage | None = None) -> LocalizationJob:
+def process_localization_job(
+    db: Session, *, job_id: uuid.UUID, storage: BlobStorage | None = None
+) -> LocalizationJob:
     settings = get_settings()
     storage = storage or BlobStorage()
     job = db.get(LocalizationJob, job_id)
@@ -421,7 +424,10 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
                             severity="HIGH",
                             original_text=rec.source_goal,
                             translated_text=rec.translated_goal,
-                            explanation=f"Semantic revision skipped due to Foundry error: {str(exc)[:300]}",
+                            explanation=(
+                                "Semantic revision skipped due to Foundry error: "
+                                f"{str(exc)[:300]}"
+                            ),
                         )
                     )
                     db.flush()
@@ -586,8 +592,10 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
             for rec in record_rows
         ]
         category_result = validate_special_categories(category_rows)
-        for issue in category_result.issues:
-            match = next((r for r in record_rows if r.source_record_key == issue.record_key), None)
+        for cat_issue in category_result.issues:
+            match = next(
+                (r for r in record_rows if r.source_record_key == cat_issue.record_key), None
+            )
             if match is None:
                 continue
             db.add(
@@ -596,11 +604,11 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
                     record_id=match.id,
                     tenant_id=job.tenant_id,
                     field_name="category",
-                    issue_type=issue.code,
+                    issue_type=cat_issue.code,
                     severity="HIGH",
-                    original_text=issue.category,
+                    original_text=cat_issue.category,
                     translated_text="",
-                    explanation=issue.message,
+                    explanation=cat_issue.message,
                 )
             )
         _set_stage(db, job, "special_category_validation", "completed")

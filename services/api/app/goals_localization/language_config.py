@@ -85,12 +85,17 @@ QA_MODES: tuple[dict[str, str], ...] = (
     {
         "id": "classic",
         "label": "Classic (Translator + Python)",
-        "description": "Protected terminology, Azure Translator, numeric/date QA, Excel rebuild. No Foundry.",
+        "description": (
+            "Protected terminology, Azure Translator, numeric/date QA, Excel rebuild. "
+            "No Foundry."
+        ),
     },
     {
         "id": "foundry",
         "label": "Foundry semantic QA",
-        "description": "Same translation path, plus Azure OpenAI meaning checks and auto-correction.",
+        "description": (
+            "Same translation path, plus Azure OpenAI meaning checks and auto-correction."
+        ),
     },
 )
 

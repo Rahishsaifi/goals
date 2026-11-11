@@ -31,10 +31,11 @@ from app.services.goals_localization.untranslated_english import detect_residual
 
 def _csv_bytes() -> bytes:
     return (
-        "GoalId,Goal,Description,KRA,JobLevelCode,LeaderOrNonLeader,FunctionalArea,JobFunctionCode,Category\n"
-        "G1,Grow revenue 10%,Increase ARR by 10% by Q4 2026,Revenue KRA,L5,Leader,Sales,JF01,Hotel Revenue Growth\n"
-        "G2,Improve ops,Cut waste 5%,Ops KRA,L4,NonLeader,Ops,JF02,Operational Productivity\n"
-    ).encode("utf-8")
+        b"GoalId,Goal,Description,KRA,JobLevelCode,LeaderOrNonLeader,FunctionalArea,JobFunctionCode,Category\n"
+        b"G1,Grow revenue 10%,Increase ARR by 10% by Q4 2026,Revenue KRA,"
+        b"L5,Leader,Sales,JF01,Hotel Revenue Growth\n"
+        b"G2,Improve ops,Cut waste 5%,Ops KRA,L4,NonLeader,Ops,JF02,Operational Productivity\n"
+    )
 
 
 def _xlsx_bytes() -> bytes:
@@ -55,8 +56,15 @@ def _xlsx_bytes() -> bytes:
             "Code",
         ]
     )
-    ws.append(["G1", "old", "old", "old", "L5", "Leader", "Sales", "JF01", "Hotel Revenue Growth", "en"])
-    ws.append(["G2", "old", "old", "old", "L4", "NonLeader", "Ops", "JF02", "Operational Productivity", "en"])
+    ws.append(
+        ["G1", "old", "old", "old", "L5", "Leader", "Sales", "JF01", "Hotel Revenue Growth", "en"]
+    )
+    ws.append(
+        [
+            "G2", "old", "old", "old", "L4", "NonLeader", "Ops", "JF02",
+            "Operational Productivity", "en",
+        ]
+    )
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -272,11 +280,11 @@ def test_quarters_beside_chinese_characters_still_match() -> None:
 def test_csv_with_language_code_column_does_not_collide() -> None:
     """Real Goals Library CSVs use Code=en on every row; that must not be the record key."""
     data = (
-        "JobLevelCode,LeaderOrNonLeader,FunctionalArea,JobFunctionCode,Category,Goal,Description,KRA,Code\n"
-        "1,Leader,Program Management,AM,Operational Productivity,Goal A,Desc A,KRA A,en\n"
-        "2,Leader,Program Management,AM,Operational Productivity,Goal A,Desc A,KRA A,en\n"
-        "1,Non-Leader,Program Management,AM,Operational Productivity,Goal B,Desc B,KRA B,en\n"
-    ).encode("utf-8")
+        b"JobLevelCode,LeaderOrNonLeader,FunctionalArea,JobFunctionCode,Category,Goal,Description,KRA,Code\n"
+        b"1,Leader,Program Management,AM,Operational Productivity,Goal A,Desc A,KRA A,en\n"
+        b"2,Leader,Program Management,AM,Operational Productivity,Goal A,Desc A,KRA A,en\n"
+        b"1,Non-Leader,Program Management,AM,Operational Productivity,Goal B,Desc B,KRA B,en\n"
+    )
     sources = read_english_csv(data)
     assert len(sources) == 3
     assert sources[0].record_key != "en"
@@ -294,9 +302,9 @@ def test_build_workbook_from_english_csv() -> None:
 
 def test_workbook_keeps_source_columns_and_does_not_invent_goal_id() -> None:
     data = (
-        "JobLevelCode,LeaderOrNonLeader,FunctionalArea,JobFunctionCode,Category,Goal,Description,KRA,Code\n"
-        "1,Leader,Program Management,AM,Operational Productivity,Goal A,Desc A,KRA A,en\n"
-    ).encode("utf-8")
+        b"JobLevelCode,LeaderOrNonLeader,FunctionalArea,JobFunctionCode,Category,Goal,Description,KRA,Code\n"
+        b"1,Leader,Program Management,AM,Operational Productivity,Goal A,Desc A,KRA A,en\n"
+    )
     sources = read_english_csv(data)
     workbook_bytes = build_workbook_from_sources(sources, language_code="hi")
     template = read_template_workbook(workbook_bytes)

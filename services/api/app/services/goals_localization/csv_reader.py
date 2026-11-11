@@ -139,7 +139,7 @@ def read_english_csv(data: bytes) -> GoalSourceTable:
         if key in seen:
             raise ValueError(f"Duplicate source record key '{key}' at CSV row {index}.")
         seen.add(key)
-        technical = {
+        technical: dict[str, str] = {
             name: mapped.get(name, "")
             for name in (
                 "JobLevelCode",

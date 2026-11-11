@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 
 from app.services.goals_localization.numeric_validator import compare_numeric_fields
 
-
 SPECIAL_CATEGORIES = frozenset({"Hotel Revenue Growth", "Operational Productivity"})
 
 
@@ -38,16 +37,19 @@ def validate_special_categories(
         category = (row.get("category") or "").strip()
         if category not in SPECIAL_CATEGORIES:
             continue
-        for field in ("goal", "description", "kra"):
-            source = row.get(f"source_{field}", "")
-            translated = row.get(f"translated_{field}", "")
+        for column in ("goal", "description", "kra"):
+            source = row.get(f"source_{column}", "")
+            translated = row.get(f"translated_{column}", "")
             if source and not translated:
                 result.issues.append(
                     CategoryIssue(
                         category=category,
                         record_key=row["record_key"],
                         code="BLANK_SPECIAL_CATEGORY_FIELD",
-                        message=f"{category}: translated {field} is blank while English has content.",
+                        message=(
+                            f"{category}: translated {column} is blank "
+                            "while English has content."
+                        ),
                     )
                 )
             for issue in compare_numeric_fields(source, translated):

@@ -22,7 +22,9 @@ _NUMBER_RE = re.compile(
     _BEFORE + r"(?:\$|€|£)?\d{1,3}(?:[,\s]\d{3})*(?:\.\d+)?%?" + _AFTER
 )
 _QUARTER_RE = re.compile(
-    _BEFORE + r"Q[1-4]" + _AFTER + "|" + _BEFORE + r"FY\s*\d{2,4}" + _AFTER + "|" + _BEFORE + r"20\d{2}-\d{2}" + _AFTER,
+    _BEFORE + r"Q[1-4]" + _AFTER
+    + "|" + _BEFORE + r"FY\s*\d{2,4}" + _AFTER
+    + "|" + _BEFORE + r"20\d{2}-\d{2}" + _AFTER,
     re.IGNORECASE,
 )
 _DATE_RE = re.compile(

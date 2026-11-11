@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font
 
-from app.services.goals_localization.csv_reader import GoalSourceRecord, _HEADER_MAP, _norm_header
+from app.services.goals_localization.csv_reader import _HEADER_MAP, GoalSourceRecord, _norm_header
 
 
 @dataclass
@@ -23,7 +23,9 @@ def _source_headers(sources: list[GoalSourceRecord]) -> list[str]:
         return list(shared)
     if sources and sources[0].headers:
         return list(sources[0].headers)
-    raise ValueError("English CSV headers are missing, so the workbook cannot keep source column order.")
+    raise ValueError(
+        "English CSV headers are missing, so the workbook cannot keep source column order."
+    )
 
 
 def _canonical(header: str) -> str:

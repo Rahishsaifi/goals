@@ -81,7 +81,9 @@ def pricing(
         return {
             "provider": "foundry",
             "deployment": settings.azure_openai_deployment,
-            "note": "Live Azure OpenAI pay-per-token. POC budget alert is USD $10 on rg-meridian-poc.",
+            "note": (
+                "Live Azure OpenAI pay-per-token. POC budget alert is USD $10 on rg-meridian-poc."
+            ),
             "rates_per_million_tokens": {
                 "input": "see Azure pricing for gpt-4.1-mini",
                 "output": "see Azure pricing for gpt-4.1-mini",

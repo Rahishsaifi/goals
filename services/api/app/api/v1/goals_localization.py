@@ -8,7 +8,8 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app.api.deps import AuthContext, DbSession, require_csrf, require_roles
+from app.api.deps import DbSession, require_csrf, require_roles
+from app.core.config import get_settings
 from app.goals_localization.language_config import (
     DEFAULT_QA_MODE,
     MANDATORY_OPTIONS,
@@ -19,8 +20,8 @@ from app.goals_localization.language_config import (
 from app.integrations.storage import BlobStorage
 from app.models.auth import MembershipRole
 from app.models.goals_localization import LocalizationJob, LocalizationJobStatus
+from app.security.auth_context import AuthContext
 from app.services.goals_localization import job_service
-from app.core.config import get_settings
 from app.services.goals_localization.glossary_store import (
     default_semantic_prompt,
     load_glossary,
@@ -63,7 +64,7 @@ def _storage() -> BlobStorage:
     return BlobStorage()
 
 
-def _job_payload(job) -> dict[str, object]:
+def _job_payload(job: LocalizationJob) -> dict[str, object]:
     return {
         "id": str(job.id),
         "status": job.status.value if hasattr(job.status, "value") else str(job.status),
@@ -88,7 +89,7 @@ def _job_payload(job) -> dict[str, object]:
     }
 
 
-def _job_list_item(job) -> dict[str, object]:
+def _job_list_item(job: LocalizationJob) -> dict[str, object]:
     """Small row for the files list; the full payload is fetched per job."""
     summary = job.summary or {}
     cost = job.cost_estimate or {}
@@ -130,7 +131,11 @@ def get_queue(
     db: DbSession,
     auth: Annotated[
         AuthContext,
-        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer)),
+        Depends(
+            require_roles(
+                MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer
+            )
+        ),
     ],
 ) -> dict[str, object]:
     if auth.tenant_id is None:
@@ -191,7 +196,11 @@ def get_translator_fallback(
     db: DbSession,
     auth: Annotated[
         AuthContext,
-        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer)),
+        Depends(
+            require_roles(
+                MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer
+            )
+        ),
     ],
 ) -> dict[str, object]:
     if auth.tenant_id is None:
@@ -199,7 +208,9 @@ def get_translator_fallback(
     settings = get_settings()
     return {
         "enabled": paid_translator_enabled(db, auth.tenant_id),
-        "configured": bool(settings.azure_translator_paid_key and settings.azure_translator_paid_endpoint),
+        "configured": bool(
+            settings.azure_translator_paid_key and settings.azure_translator_paid_endpoint
+        ),
     }
 
 
@@ -222,7 +233,11 @@ def get_glossary(
     db: DbSession,
     auth: Annotated[
         AuthContext,
-        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer)),
+        Depends(
+            require_roles(
+                MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer
+            )
+        ),
     ],
 ) -> dict[str, object]:
     if auth.tenant_id is None:
@@ -265,7 +280,11 @@ def get_prompt(
     db: DbSession,
     auth: Annotated[
         AuthContext,
-        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer)),
+        Depends(
+            require_roles(
+                MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer
+            )
+        ),
     ],
 ) -> dict[str, object]:
     if auth.tenant_id is None:
@@ -334,7 +353,9 @@ async def create_job(
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     except Exception as exc:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Could not create localization job: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"Could not create localization job: {exc}"
+        ) from exc
     return {"job": _job_payload(job)}
 
 
@@ -343,7 +364,11 @@ def list_jobs(
     db: DbSession,
     auth: Annotated[
         AuthContext,
-        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer)),
+        Depends(
+            require_roles(
+                MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer
+            )
+        ),
     ],
 ) -> dict[str, object]:
     if auth.tenant_id is None:
@@ -358,7 +383,11 @@ def get_job_logs(
     db: DbSession,
     auth: Annotated[
         AuthContext,
-        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer)),
+        Depends(
+            require_roles(
+                MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer
+            )
+        ),
     ],
 ) -> dict[str, object]:
     if auth.tenant_id is None:
@@ -383,7 +412,11 @@ def get_job(
     db: DbSession,
     auth: Annotated[
         AuthContext,
-        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer)),
+        Depends(
+            require_roles(
+                MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer
+            )
+        ),
     ],
 ) -> dict[str, object]:
     if auth.tenant_id is None:
@@ -401,7 +434,11 @@ def get_progress(
     db: DbSession,
     auth: Annotated[
         AuthContext,
-        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer)),
+        Depends(
+            require_roles(
+                MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer
+            )
+        ),
     ],
 ) -> dict[str, object]:
     if auth.tenant_id is None:

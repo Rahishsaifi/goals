@@ -159,7 +159,9 @@ def main() -> int:
             run_once(session_factory, settings)
         except Exception as exc:
             print(
-                json.dumps({"component": "worker", "status": "loop_error", "error": str(exc)[:300]}),
+                json.dumps(
+                    {"component": "worker", "status": "loop_error", "error": str(exc)[:300]}
+                ),
                 flush=True,
             )
             time.sleep(max(settings.poll_seconds, 5.0))

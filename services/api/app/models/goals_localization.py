@@ -97,7 +97,9 @@ class LocalizationRecord(Base):
         default=LocalizationRecordStatus.pending,
     )
     qa_status: Mapped[str] = mapped_column(String(40), nullable=False, default="pending")
-    correction_attempts: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    correction_attempts: Mapped[dict[str, object]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
     source_hashes: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
 
 

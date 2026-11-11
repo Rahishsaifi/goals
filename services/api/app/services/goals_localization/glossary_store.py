@@ -48,7 +48,8 @@ def _snapshot(terms: list[GlossaryTerm]) -> GlossarySnapshot:
     preserve = tuple(term.term for term in terms if term.action == "preserve")
     allow_english = tuple(term.term for term in terms if term.action == "allow")
     residual_allow = frozenset((*preserve, *allow_english))
-    digest = hashlib.sha256("|".join(sorted(residual_allow, key=str.lower)).encode()).hexdigest()[:12]
+    joined = "|".join(sorted(residual_allow, key=str.lower))
+    digest = hashlib.sha256(joined.encode()).hexdigest()[:12]
     return GlossarySnapshot(
         terms=tuple(terms),
         preserve=preserve,
@@ -107,7 +108,7 @@ def load_semantic_prompt(db: Session, tenant_id: uuid.UUID) -> tuple[str, bool]:
     """Return the prompt Foundry should use, and whether the tenant customized it."""
     row = db.get(LocalizationGlossary, tenant_id)
     saved = (row.semantic_prompt or "").strip() if row is not None else ""
-    if not saved:
+    if row is None or not saved:
         return default_semantic_prompt(), False
     return row.semantic_prompt or default_semantic_prompt(), True
 

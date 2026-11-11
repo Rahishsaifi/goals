@@ -36,6 +36,10 @@ namespace_packages = true
 explicit_package_bases = true
 mypy_path = ["services/api", "services/worker", "packages/contracts/src", "packages/scoring/src"]
 
+[[tool.mypy.overrides]]
+module = ["openpyxl", "openpyxl.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["services/api/tests", "services/worker/tests", "packages/scoring/tests"]
 pythonpath = [
