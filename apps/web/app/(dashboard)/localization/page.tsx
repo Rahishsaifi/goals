@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { AppShell } from "@/components/AppShell";
+import { PromptDrawer } from "@/components/localization/PromptDrawer";
 import { StartLocalizationDrawer } from "@/components/localization/StartLocalizationDrawer";
 import { WorkerQueueBanner, useWorkerQueue } from "@/components/localization/WorkerQueueBanner";
 import { ExcelFileIcon } from "@/components/localization/icons";
@@ -63,6 +64,7 @@ const ICONS = {
   plus: "M12 5v14M5 12h14",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zm9 16-4-4",
   chevron: "M9 6l6 6-6 6",
+  prompt: "M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H9l-4 4v-4.5A1.5 1.5 0 0 1 4 14.5zM8 8.5h8M8 11.5h5",
 };
 
 export default function LocalizationJobsPage() {
@@ -76,6 +78,8 @@ export default function LocalizationJobsPage() {
   const [showAll, setShowAll] = useState(false);
   const [startOpen, setStartOpen] = useState(false);
   const closeStart = useCallback(() => setStartOpen(false), []);
+  const [promptOpen, setPromptOpen] = useState(false);
+  const closePrompt = useCallback(() => setPromptOpen(false), []);
 
   const loadJobs = useCallback(async () => {
     try {
@@ -160,7 +164,19 @@ export default function LocalizationJobsPage() {
             </p>
           </div>
         </div>
-        {startButton("")}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setPromptOpen(true)}
+            className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
+          >
+            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={1.8}>
+              <path strokeLinecap="round" strokeLinejoin="round" d={ICONS.prompt} />
+            </svg>
+            Manage Prompt
+          </button>
+          {startButton("")}
+        </div>
       </div>
 
       <div className="tm-card mb-4 grid grid-cols-2 divide-slate-100 px-2 py-2.5 sm:grid-cols-4 sm:divide-x">
@@ -277,6 +293,7 @@ export default function LocalizationJobsPage() {
         </section>
       </div>
       <StartLocalizationDrawer open={startOpen} onClose={closeStart} />
+      <PromptDrawer open={promptOpen} onClose={closePrompt} />
     </AppShell>
   );
 }
