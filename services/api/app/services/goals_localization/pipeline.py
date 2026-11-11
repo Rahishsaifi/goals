@@ -137,6 +137,19 @@ def _set_stage(
 def process_localization_job(
     db: Session, *, job_id: uuid.UUID, storage: BlobStorage | None = None
 ) -> LocalizationJob:
+    # The pipeline commits often for live progress. Expiring thousands of loaded records
+    # on each commit forces one reload query per record, which stalls large files.
+    previous = db.expire_on_commit
+    db.expire_on_commit = False
+    try:
+        return _run_localization_job(db, job_id=job_id, storage=storage)
+    finally:
+        db.expire_on_commit = previous
+
+
+def _run_localization_job(
+    db: Session, *, job_id: uuid.UUID, storage: BlobStorage | None = None
+) -> LocalizationJob:
     settings = get_settings()
     storage = storage or BlobStorage()
     job = db.get(LocalizationJob, job_id)
