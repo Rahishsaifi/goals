@@ -260,6 +260,32 @@ class CachedTranslator:
         self.characters_sent = 0
         self.cache_hits = 0
 
+    def _load_cache(
+        self, records: list[dict[str, str]], *, to_language: str, glossary_version: str
+    ) -> dict[str, TranslationCacheEntry]:
+        digests = sorted(
+            {
+                source_hash(source)
+                for row in records
+                for field in ("goal", "description", "kra")
+                if (source := row.get(field, "") or "").strip()
+            }
+        )
+        found: dict[str, TranslationCacheEntry] = {}
+        with self.db.no_autoflush:
+            for start in range(0, len(digests), 1000):
+                rows = self.db.scalars(
+                    select(TranslationCacheEntry).where(
+                        TranslationCacheEntry.tenant_id == self.tenant_id,
+                        TranslationCacheEntry.source_hash.in_(digests[start : start + 1000]),
+                        TranslationCacheEntry.target_language == to_language,
+                        TranslationCacheEntry.glossary_version == glossary_version,
+                    )
+                )
+                for entry in rows:
+                    found.setdefault(entry.source_hash, entry)
+        return found
+
     def translate_fields(
         self,
         *,
@@ -277,9 +303,15 @@ class CachedTranslator:
         resolved: dict[str, dict[str, str]] = {
             row["id"]: {"goal": "", "description": "", "kra": ""} for row in records
         }
+        cache = self._load_cache(
+            records, to_language=to_language, glossary_version=glossary_version
+        )
         # One Translator call per distinct source text. Every row that repeats it reuses the result.
         groups: dict[str, dict[str, object]] = {}
-        for row in records:
+        for index, row in enumerate(records):
+            # on_progress is also the cancel checkpoint, so call it during long preparation.
+            if on_progress is not None and index and index % 500 == 0:
+                on_progress(0)
             rid = row["id"]
             for field in ("goal", "description", "kra"):
                 source = row.get(field, "") or ""
@@ -287,14 +319,7 @@ class CachedTranslator:
                     resolved[rid][field] = ""
                     continue
                 digest = source_hash(source)
-                cached = self.db.scalar(
-                    select(TranslationCacheEntry).where(
-                        TranslationCacheEntry.tenant_id == self.tenant_id,
-                        TranslationCacheEntry.source_hash == digest,
-                        TranslationCacheEntry.target_language == to_language,
-                        TranslationCacheEntry.glossary_version == glossary_version,
-                    )
-                )
+                cached = cache.get(digest)
                 if cached is not None:
                     fixed = repair_translation(
                         source, cached.translated_text, to_language, preserve_terms
