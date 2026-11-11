@@ -100,6 +100,48 @@ def set_paid_translator_enabled(db: Session, tenant_id: uuid.UUID, enabled: bool
     return enabled
 
 
+JOB_EMAIL_EVENTS = ("started", "completed", "needs_review", "failed")
+
+
+@dataclass(frozen=True)
+class JobEmailSettings:
+    enabled: bool
+    recipients: list[str]
+    events: list[str]
+
+
+def load_job_email_settings(db: Session, tenant_id: uuid.UUID) -> JobEmailSettings:
+    row = db.get(LocalizationGlossary, tenant_id)
+    if row is None:
+        return JobEmailSettings(enabled=True, recipients=[], events=list(JOB_EMAIL_EVENTS))
+    return JobEmailSettings(
+        enabled=bool(row.job_emails_enabled),
+        recipients=[str(item) for item in row.job_email_recipients or []],
+        events=[str(item) for item in row.job_email_events or [] if item in JOB_EMAIL_EVENTS],
+    )
+
+
+def save_job_email_settings(
+    db: Session, tenant_id: uuid.UUID, settings: JobEmailSettings
+) -> JobEmailSettings:
+    recipients = list(dict.fromkeys(address.strip().lower() for address in settings.recipients))
+    events = [event for event in JOB_EMAIL_EVENTS if event in settings.events]
+    row = db.get(LocalizationGlossary, tenant_id)
+    if row is None:
+        row = LocalizationGlossary(
+            tenant_id=tenant_id,
+            terms=[{"term": term.term, "action": term.action} for term in default_terms()],
+            updated_at=datetime.now(UTC),
+        )
+        db.add(row)
+    row.job_emails_enabled = settings.enabled
+    row.job_email_recipients = recipients
+    row.job_email_events = events
+    row.updated_at = datetime.now(UTC)
+    db.flush()
+    return JobEmailSettings(enabled=settings.enabled, recipients=recipients, events=events)
+
+
 def default_semantic_prompt() -> str:
     return _PROMPT_PATH.read_text(encoding="utf-8")
 

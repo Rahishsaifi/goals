@@ -136,6 +136,18 @@ class LocalizationGlossary(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     terms: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False, default=list)
     paid_translator_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    job_emails_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    job_email_recipients: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    job_email_events: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=lambda: ["started", "completed", "needs_review", "failed"],
+        server_default=text("'[\"started\", \"completed\", \"needs_review\", \"failed\"]'::jsonb"),
+    )
     semantic_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()

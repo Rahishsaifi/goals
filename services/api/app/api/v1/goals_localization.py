@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import RedirectResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 
 from app.api.deps import DbSession, require_csrf, require_roles
@@ -17,19 +17,33 @@ from app.goals_localization.language_config import (
     STAGE_ORDER,
     list_languages,
 )
+from app.integrations.email import email_configured
 from app.integrations.storage import BlobStorage
 from app.models.auth import MembershipRole
-from app.models.goals_localization import LocalizationJob, LocalizationJobStatus
+from app.models.goals_localization import (
+    LocalizationJob,
+    LocalizationJobStatus,
+    LocalizationQAResult,
+    LocalizationRecord,
+)
 from app.security.auth_context import AuthContext
 from app.services.goals_localization import job_service
 from app.services.goals_localization.glossary_store import (
+    JobEmailSettings,
     default_semantic_prompt,
     load_glossary,
+    load_job_email_settings,
     load_semantic_prompt,
     paid_translator_enabled,
     save_glossary,
+    save_job_email_settings,
     save_semantic_prompt,
     set_paid_translator_enabled,
+)
+from app.services.goals_localization.issue_rows import (
+    RowIssue,
+    build_issue_rows_workbook,
+    issue_rows_filename,
 )
 from app.services.goals_localization.pipeline import CONTAINER
 
@@ -38,6 +52,14 @@ router = APIRouter(prefix="/goals-localization", tags=["goals-localization"])
 
 class PaidTranslatorUpdate(BaseModel):
     enabled: bool
+
+
+class JobEmailSettingsUpdate(BaseModel):
+    enabled: bool
+    recipients: list[EmailStr] = Field(default_factory=list, max_length=20)
+    events: list[Literal["started", "completed", "needs_review", "failed"]] = Field(
+        default_factory=list
+    )
 
 
 class GlossaryTermIn(BaseModel):
@@ -226,6 +248,52 @@ def put_translator_fallback(
     enabled = set_paid_translator_enabled(db, auth.tenant_id, payload.enabled)
     db.commit()
     return {"enabled": enabled}
+
+
+@router.get("/job-emails")
+def get_job_emails(
+    db: DbSession,
+    auth: Annotated[
+        AuthContext,
+        Depends(
+            require_roles(
+                MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer
+            )
+        ),
+    ],
+) -> dict[str, object]:
+    if auth.tenant_id is None:
+        raise HTTPException(status_code=403, detail="Tenant context required.")
+    preferences = load_job_email_settings(db, auth.tenant_id)
+    is_admin = auth.role == MembershipRole.tenant_admin
+    return {
+        "enabled": preferences.enabled,
+        "configured": email_configured(),
+        "recipients": preferences.recipients if is_admin else [],
+        "events": preferences.events,
+    }
+
+
+@router.put("/job-emails")
+def put_job_emails(
+    payload: JobEmailSettingsUpdate,
+    db: DbSession,
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    _: Annotated[AuthContext, Depends(require_roles(MembershipRole.tenant_admin))],
+) -> dict[str, object]:
+    if auth.tenant_id is None:
+        raise HTTPException(status_code=403, detail="Tenant context required.")
+    saved = save_job_email_settings(
+        db,
+        auth.tenant_id,
+        JobEmailSettings(
+            enabled=payload.enabled,
+            recipients=[str(address) for address in payload.recipients],
+            events=list(payload.events),
+        ),
+    )
+    db.commit()
+    return {"enabled": saved.enabled, "recipients": saved.recipients, "events": saved.events}
 
 
 @router.get("/glossary")
@@ -504,6 +572,61 @@ def download_workbook(
         f"Goals_{job.target_language}_{label}.xlsx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+@router.get("/jobs/{job_id}/issue-rows")
+def download_issue_rows(
+    job_id: uuid.UUID,
+    db: DbSession,
+    auth: Annotated[
+        AuthContext,
+        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter)),
+    ],
+) -> Response:
+    if auth.tenant_id is None:
+        raise HTTPException(status_code=403, detail="Tenant context required.")
+    try:
+        job = job_service.get_job(db, tenant_id=auth.tenant_id, job_id=job_id)
+    except job_service.GoalsLocalizationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    if not job.output_blob_name:
+        raise HTTPException(status_code=404, detail="Workbook not available yet.")
+    # Same issues the hard gate counts: open, and not the LOW-severity Foundry revisions.
+    rows = db.execute(
+        select(LocalizationRecord.template_row_index, LocalizationQAResult)
+        .join(LocalizationRecord, LocalizationRecord.id == LocalizationQAResult.record_id)
+        .where(
+            LocalizationQAResult.job_id == job.id,
+            LocalizationQAResult.tenant_id == auth.tenant_id,
+            LocalizationQAResult.reviewer_status == "open",
+            LocalizationQAResult.severity != "LOW",
+        )
+    ).all()
+    issues_by_row: dict[int, list[RowIssue]] = {}
+    for row_index, issue in rows:
+        if not row_index:
+            continue
+        issues_by_row.setdefault(int(row_index), []).append(
+            RowIssue(
+                field_name=issue.field_name,
+                issue_type=issue.issue_type,
+                severity=issue.severity,
+                explanation=issue.explanation,
+            )
+        )
+    if not issues_by_row:
+        raise HTTPException(status_code=404, detail="This job has no open issue rows.")
+    storage = _storage()
+    data = build_issue_rows_workbook(
+        storage.download_bytes(container=CONTAINER, blob_name=job.output_blob_name), issues_by_row
+    )
+    filename = issue_rows_filename(job.target_language)
+    blob_name = f"{job.tenant_id}/{job.id}/{filename}"
+    content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    storage.upload_bytes(
+        container=CONTAINER, blob_name=blob_name, data=data, content_type=content_type
+    )
+    return _blob_redirect(blob_name, filename, content_type)
 
 
 def _blob_redirect(blob_name: str, filename: str, content_type: str) -> RedirectResponse:

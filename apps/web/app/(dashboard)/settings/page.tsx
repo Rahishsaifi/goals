@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { AppShell } from "@/components/AppShell";
+import { JobEmailSettings } from "@/components/settings/JobEmailSettings";
 import { API_BASE, csrfToken, readApiError } from "@/lib/api";
 
 export default function SettingsPage() {
@@ -12,7 +13,6 @@ export default function SettingsPage() {
   const [paidEnabled, setPaidEnabled] = useState(false);
   const [paidConfigured, setPaidConfigured] = useState(false);
   const [paidNote, setPaidNote] = useState<string | null>(null);
-
   useEffect(() => {
     void fetch(`${API_BASE}/api/v1/auth/me`, { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
@@ -90,6 +90,7 @@ export default function SettingsPage() {
             />
           </button>
         </div>
+        <JobEmailSettings isAdmin={role === "tenant_admin"} />
       </div>
     </AppShell>
   );

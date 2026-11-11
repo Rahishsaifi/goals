@@ -16,7 +16,7 @@ const NAV = [
   { href: "/resumes", label: "Resumes", icon: "📄" },
   { href: "/evaluations", label: "Run AI matching", icon: "◎" },
   { href: "/candidates", label: "Candidates", icon: "◉" },
-  { href: "/goals-localization", label: "Goals Translation", icon: "🌐" },
+  { href: "/localization", label: "Goals Translation", icon: "🌐" },
   { href: "/settings", label: "Settings", icon: "⚙" },
   { href: "/usage", label: "Usage & Costs", icon: "◔" },
   { href: "/infra", label: "Infra", icon: "▣" },

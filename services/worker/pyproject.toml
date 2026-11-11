@@ -3,6 +3,7 @@ name = "recruitment-worker"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+  "azure-communication-email>=1.0.0",
   "azure-storage-blob>=12.31.0",
   "httpx>=0.28.1",
   "openpyxl>=3.1.5",

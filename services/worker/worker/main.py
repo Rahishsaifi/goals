@@ -17,7 +17,12 @@ from app.integrations.foundry_provider import FoundryProviderError
 from app.integrations.model_provider import get_model_provider
 from app.integrations.storage import BlobStorage
 from app.models.domain import OutboxEvent
+from app.models.goals_localization import LocalizationJob
 from app.services import evaluation_service, processing_service
+from app.services.goals_localization.notifications import (
+    notify_job_finished,
+    notify_job_started,
+)
 from app.services.goals_localization.pipeline import process_localization_job
 
 
@@ -28,6 +33,20 @@ class WorkerSettings(BaseSettings):
     once: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+
+def _log_email(job: LocalizationJob, kind: str, sent: bool) -> None:
+    print(
+        json.dumps(
+            {
+                "component": "worker",
+                "status": "job_email_sent" if sent else "job_email_skipped",
+                "kind": kind,
+                "job_id": str(job.id),
+            }
+        ),
+        flush=True,
+    )
 
 
 def run_once(session_factory: sessionmaker[Session], settings: WorkerSettings) -> int:
@@ -45,6 +64,7 @@ def run_once(session_factory: sessionmaker[Session], settings: WorkerSettings) -
 
     for event in events:
         event_db = session_factory()
+        finished_job: LocalizationJob | None = None
         try:
             locked = event_db.get(OutboxEvent, event.id)
             if locked is None or locked.processed_at is not None:
@@ -71,7 +91,7 @@ def run_once(session_factory: sessionmaker[Session], settings: WorkerSettings) -
                     event_db, run_id=run_id, provider=provider
                 )
             elif locked.event_type == "goals.localization.run":
-                from app.models.goals_localization import LocalizationJob, LocalizationJobStatus
+                from app.models.goals_localization import LocalizationJobStatus
 
                 job_id = uuid.UUID(str(locked.payload["job_id"]))
                 job = event_db.get(LocalizationJob, job_id)
@@ -88,10 +108,16 @@ def run_once(session_factory: sessionmaker[Session], settings: WorkerSettings) -
                         flush=True,
                     )
                 else:
-                    process_localization_job(event_db, job_id=job_id, storage=storage)
+                    if job is not None and job.status == LocalizationJobStatus.uploaded:
+                        _log_email(job, "started", notify_job_started(event_db, job))
+                    finished_job = process_localization_job(
+                        event_db, job_id=job_id, storage=storage
+                    )
             processing_service.mark_processed(event_db, locked)
             event_db.commit()
             processed += 1
+            if finished_job is not None:
+                _log_email(finished_job, "finished", notify_job_finished(event_db, finished_job))
             print(
                 json.dumps(
                     {

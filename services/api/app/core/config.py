@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     # below the deployment quota.
     goals_foundry_concurrency: int = 24
     goals_foundry_tokens_per_minute: int = 600000
+    # Azure Communication Services Email. Job emails are skipped when these are unset.
+    azure_communication_connection_string: str | None = None
+    email_sender_address: str | None = None
+    web_base_url: str = "http://localhost:3000"
     session_cookie_name: str = "ri_session"
     csrf_cookie_name: str = "ri_csrf"
     csrf_header_name: str = "x-csrf-token"
