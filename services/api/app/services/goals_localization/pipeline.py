@@ -47,12 +47,14 @@ from app.services.goals_localization.translator_service import (
     build_translator_client,
 )
 from app.services.goals_localization.untranslated_english import detect_residual_english
+from app.services.processing_service import renew_outbox_lease
 
 logger = logging.getLogger(__name__)
 
 CONTAINER = "goals-localization"
 
 MAX_JOB_EVENTS = 400
+_last_heartbeat: dict[uuid.UUID, float] = {}
 
 STAGE_NAMES = {
     "file_validation": "File validation",
@@ -99,6 +101,10 @@ def _ensure_not_cancelled(db: Session, job: LocalizationJob) -> None:
         ).scalar_one_or_none()
     if current == LocalizationJobStatus.cancelled:
         raise LocalizationCancelled()
+    now = time.monotonic()
+    if now - _last_heartbeat.get(job.id, 0.0) >= 30:
+        _last_heartbeat[job.id] = now
+        renew_outbox_lease(db, aggregate_id=job.id)
 
 
 def _set_stage(
@@ -174,6 +180,8 @@ def _run_localization_job(
         )
 
         # 1. File validation / load English CSV (+ generated workbook copy)
+        job.error_message = None
+        job.completed_at = None
         job.status = LocalizationJobStatus.validating
         _set_stage(db, job, "file_validation", "running", f"qa_mode={qa_mode}")
         db.flush()
@@ -774,6 +782,7 @@ def _run_localization_job(
             job.status = LocalizationJobStatus.needs_review
         else:
             job.status = LocalizationJobStatus.completed
+        job.error_message = None
         job.completed_at = datetime.now(UTC)
         log_job_event(
             job,

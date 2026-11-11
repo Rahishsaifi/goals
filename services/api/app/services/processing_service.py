@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from app.integrations.model_provider import ModelProvider
@@ -11,6 +11,26 @@ from app.integrations.storage import BlobStorage
 from app.models.domain import OutboxEvent, ProcessingStatus, Resume, ResumeVersion
 from app.parsers.documents import UnsupportedDocumentError, parse_document
 from app.services import usage_service
+
+OUTBOX_LEASE = timedelta(minutes=5)
+
+
+def release_outbox_event(db: Session, event_id: uuid.UUID) -> None:
+    """Let a failed event be retried right away instead of after the lease expires."""
+    db.execute(update(OutboxEvent).where(OutboxEvent.id == event_id).values(locked_at=None))
+    db.commit()
+
+
+def renew_outbox_lease(db: Session, *, aggregate_id: uuid.UUID) -> None:
+    """Heartbeat for long jobs; committed with the caller's next commit."""
+    db.execute(
+        update(OutboxEvent)
+        .where(
+            OutboxEvent.aggregate_id == aggregate_id,
+            OutboxEvent.processed_at.is_(None),
+        )
+        .values(locked_at=datetime.now(UTC))
+    )
 
 
 def claim_outbox_events(db: Session, *, limit: int = 10) -> list[OutboxEvent]:
@@ -20,6 +40,11 @@ def claim_outbox_events(db: Session, *, limit: int = 10) -> list[OutboxEvent]:
             .where(
                 OutboxEvent.processed_at.is_(None),
                 OutboxEvent.available_at <= datetime.now(UTC),
+                # Another worker owns the event while its lease is fresh (e.g. during a deploy).
+                or_(
+                    OutboxEvent.locked_at.is_(None),
+                    OutboxEvent.locked_at < datetime.now(UTC) - OUTBOX_LEASE,
+                ),
             )
             .order_by(OutboxEvent.created_at.asc())
             .limit(limit)

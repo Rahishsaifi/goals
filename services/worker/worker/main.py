@@ -36,7 +36,7 @@ def run_once(session_factory: sessionmaker[Session], settings: WorkerSettings) -
     processed = 0
     db = session_factory()
     try:
-        events = processing_service.claim_outbox_events(db, limit=10)
+        events = processing_service.claim_outbox_events(db, limit=1)
         db.commit()
     except Exception:
         db.rollback()
@@ -104,6 +104,7 @@ def run_once(session_factory: sessionmaker[Session], settings: WorkerSettings) -
             )
         except FoundryProviderError as exc:
             event_db.rollback()
+            processing_service.release_outbox_event(event_db, event.id)
             print(
                 json.dumps(
                     {
@@ -119,6 +120,7 @@ def run_once(session_factory: sessionmaker[Session], settings: WorkerSettings) -
             time.sleep(5)
         except Exception as exc:
             event_db.rollback()
+            processing_service.release_outbox_event(event_db, event.id)
             print(
                 json.dumps(
                     {
