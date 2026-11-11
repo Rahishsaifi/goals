@@ -131,6 +131,7 @@ class LocalizationGlossary(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     terms: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False, default=list)
     paid_translator_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    semantic_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )

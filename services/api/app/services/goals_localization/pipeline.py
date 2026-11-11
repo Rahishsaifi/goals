@@ -10,7 +10,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.services.goals_localization.glossary_store import load_glossary, paid_translator_enabled
+from app.services.goals_localization.glossary_store import (
+    load_glossary,
+    load_semantic_prompt,
+    paid_translator_enabled,
+)
 from app.goals_localization.language_config import resolve_language, resolve_qa_mode
 from app.integrations.foundry_provider import FoundryProviderError
 from app.integrations.storage import BlobStorage
@@ -257,6 +261,7 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
             _set_stage(db, job, "semantic_qa", "running")
             db.flush()
             qa = build_semantic_qa_service()
+            semantic_prompt, _custom = load_semantic_prompt(db, job.tenant_id)
             _set_stage(db, job, "automatic_correction", "running")
             for index, rec in enumerate(record_rows):
                 if index:
@@ -272,6 +277,7 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
                         translated_description=rec.translated_description,
                         translated_kra=rec.translated_kra,
                         preserve_terms=list(glossary.preserve),
+                        system_prompt=semantic_prompt,
                     )
                 except FoundryProviderError as exc:
                     # Do not block the whole worker queue on one rate-limited record.

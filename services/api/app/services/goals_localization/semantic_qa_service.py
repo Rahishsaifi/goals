@@ -141,6 +141,7 @@ class SemanticQAService:
         translated_description: str,
         translated_kra: str,
         preserve_terms: list[str],
+        system_prompt: str | None = None,
     ) -> RecordRevision:
         """Ask Foundry to repair meaning. Unchanged fields come back as written."""
         originals = {
@@ -148,7 +149,7 @@ class SemanticQAService:
             "description": translated_description,
             "kra": translated_kra,
         }
-        system = _load_prompt(_REVISION_PATH)
+        system = (system_prompt or "").strip() or _load_prompt(_REVISION_PATH)
         user = json.dumps(
             {
                 "target_language": target_language,

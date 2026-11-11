@@ -22,9 +22,12 @@ from app.models.goals_localization import LocalizationJob, LocalizationJobStatus
 from app.services.goals_localization import job_service
 from app.core.config import get_settings
 from app.services.goals_localization.glossary_store import (
+    default_semantic_prompt,
     load_glossary,
+    load_semantic_prompt,
     paid_translator_enabled,
     save_glossary,
+    save_semantic_prompt,
     set_paid_translator_enabled,
 )
 from app.services.goals_localization.pipeline import CONTAINER
@@ -43,6 +46,10 @@ class GlossaryTermIn(BaseModel):
 
 class GlossaryUpdate(BaseModel):
     terms: list[GlossaryTermIn] = Field(min_length=1)
+
+
+class SemanticPromptUpdate(BaseModel):
+    prompt: str = Field(max_length=200000)
 
 
 class ReviewRequest(BaseModel):
@@ -215,6 +222,49 @@ def put_glossary(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "terms": [{"term": item.term, "action": item.action} for item in snapshot.terms],
+    }
+
+
+@router.get("/prompt")
+def get_prompt(
+    db: DbSession,
+    auth: Annotated[
+        AuthContext,
+        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer)),
+    ],
+) -> dict[str, object]:
+    if auth.tenant_id is None:
+        raise HTTPException(status_code=403, detail="Tenant context required.")
+    prompt, customized = load_semantic_prompt(db, auth.tenant_id)
+    return {
+        "prompt": prompt,
+        "default_prompt": default_semantic_prompt(),
+        "customized": customized,
+    }
+
+
+@router.put("/prompt")
+def put_prompt(
+    payload: SemanticPromptUpdate,
+    db: DbSession,
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    _: Annotated[
+        AuthContext,
+        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter)),
+    ],
+) -> dict[str, object]:
+    if auth.tenant_id is None:
+        raise HTTPException(status_code=403, detail="Tenant context required.")
+    try:
+        prompt, customized = save_semantic_prompt(db, auth.tenant_id, payload.prompt)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "prompt": prompt,
+        "default_prompt": default_semantic_prompt(),
+        "customized": customized,
     }
 
 

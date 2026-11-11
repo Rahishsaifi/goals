@@ -25,12 +25,11 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def validation_exception_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        del exc
         return _error_response(
             request,
             status_code=422,
             code="validation_error",
-            message="Request validation failed.",
+            message=_validation_message(exc),
         )
 
     @app.exception_handler(Exception)
@@ -43,6 +42,15 @@ def register_exception_handlers(app: FastAPI) -> None:
             code="internal_error",
             message="The request could not be completed.",
         )
+
+
+def _validation_message(exc: RequestValidationError) -> str:
+    for err in exc.errors():
+        if err.get("type") == "string_too_long":
+            max_length = (err.get("ctx") or {}).get("max_length")
+            if isinstance(max_length, int):
+                return f"Prompt must be {max_length:,} characters or fewer."
+    return "Request validation failed."
 
 
 def _safe_http_message(exc: StarletteHTTPException) -> str:

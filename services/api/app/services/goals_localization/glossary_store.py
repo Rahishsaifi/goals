@@ -6,11 +6,17 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from app.goals_localization.glossary import ENGLISH_ALLOWLIST, GLOSSARY_VERSION, PRESERVE_TERMS
 from app.models.goals_localization import LocalizationGlossary
+
+_PROMPT_PATH = (
+    Path(__file__).resolve().parents[2] / "goals_localization" / "prompts" / "semantic_revision.txt"
+)
+_MAX_PROMPT_CHARS = 200_000
 
 
 @dataclass(frozen=True)
@@ -87,6 +93,41 @@ def set_paid_translator_enabled(db: Session, tenant_id: uuid.UUID, enabled: bool
         row.updated_at = datetime.now(UTC)
     db.flush()
     return enabled
+
+
+def default_semantic_prompt() -> str:
+    return _PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def load_semantic_prompt(db: Session, tenant_id: uuid.UUID) -> tuple[str, bool]:
+    """Return the prompt Foundry should use, and whether the tenant customized it."""
+    row = db.get(LocalizationGlossary, tenant_id)
+    saved = (row.semantic_prompt or "").strip() if row is not None else ""
+    if not saved:
+        return default_semantic_prompt(), False
+    return row.semantic_prompt or default_semantic_prompt(), True
+
+
+def save_semantic_prompt(db: Session, tenant_id: uuid.UUID, prompt: str) -> tuple[str, bool]:
+    text = prompt.strip()
+    if len(text) > _MAX_PROMPT_CHARS:
+        raise ValueError(f"Prompt must be {_MAX_PROMPT_CHARS} characters or fewer.")
+    default = default_semantic_prompt().strip()
+    stored = None if not text or text == default else text
+    row = db.get(LocalizationGlossary, tenant_id)
+    if row is None:
+        row = LocalizationGlossary(
+            tenant_id=tenant_id,
+            terms=[{"term": term.term, "action": term.action} for term in default_terms()],
+            semantic_prompt=stored,
+            updated_at=datetime.now(UTC),
+        )
+        db.add(row)
+    else:
+        row.semantic_prompt = stored
+        row.updated_at = datetime.now(UTC)
+    db.flush()
+    return (stored or default_semantic_prompt(), stored is not None)
 
 
 def load_glossary(db: Session, tenant_id: uuid.UUID) -> GlossarySnapshot:
