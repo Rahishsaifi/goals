@@ -81,6 +81,8 @@ def _job_payload(job) -> dict[str, object]:
         "cost_estimate": job.cost_estimate or {},
         "source_filename": job.source_filename,
         "template_filename": job.template_filename,
+        "has_output": bool(job.output_blob_name),
+        "has_report": bool(job.report_blob_name),
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
     }
@@ -125,6 +127,7 @@ def get_queue(
         "busy": len(jobs) > 0,
         "waiting": waiting,
         "active_count": len(jobs),
+        "active_job_id": str(jobs[0].id) if jobs else None,
         "processing": None
         if processing is None
         else {
@@ -308,6 +311,45 @@ async def create_job(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Could not create localization job: {exc}") from exc
     return {"job": _job_payload(job)}
+
+
+@router.get("/jobs")
+def list_jobs(
+    db: DbSession,
+    auth: Annotated[
+        AuthContext,
+        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer)),
+    ],
+) -> dict[str, object]:
+    if auth.tenant_id is None:
+        raise HTTPException(status_code=403, detail="Tenant context required.")
+    jobs = job_service.list_jobs(db, tenant_id=auth.tenant_id)
+    return {"jobs": [_job_payload(job) for job in jobs]}
+
+
+@router.get("/jobs/{job_id}/logs")
+def get_job_logs(
+    job_id: uuid.UUID,
+    db: DbSession,
+    auth: Annotated[
+        AuthContext,
+        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter, MembershipRole.viewer)),
+    ],
+) -> dict[str, object]:
+    if auth.tenant_id is None:
+        raise HTTPException(status_code=403, detail="Tenant context required.")
+    try:
+        job = job_service.get_job(db, tenant_id=auth.tenant_id, job_id=job_id)
+    except job_service.GoalsLocalizationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    return {
+        "job_id": str(job.id),
+        "status": job.status.value if hasattr(job.status, "value") else str(job.status),
+        "current_stage": job.current_stage,
+        "processed_records": job.processed_records,
+        "total_records": job.total_records,
+        "events": list(job.events or []),
+    }
 
 
 @router.get("/jobs/{job_id}")

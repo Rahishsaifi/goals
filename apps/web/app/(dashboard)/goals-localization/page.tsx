@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 
 import { AppShell } from "@/components/AppShell";
 import { API_BASE, csrfToken, readApiError } from "@/lib/api";
@@ -32,10 +32,48 @@ type JobPayload = {
   error_message: string | null;
   source_filename: string;
   template_filename: string;
+  cost_estimate?: Record<string, unknown>;
+  has_output?: boolean;
+  has_report?: boolean;
   created_at?: string | null;
+  completed_at?: string | null;
+};
+
+type JobEvent = {
+  at: string;
+  level: "info" | "success" | "warning" | "error" | string;
+  stage?: string | null;
+  message: string;
+  count?: number;
+};
+
+type QueueState = {
+  busy: boolean;
+  waiting: number;
+  active_count: number;
+  active_job_id?: string | null;
+  processing: {
+    id: string;
+    status: string;
+    target_language: string;
+    source_filename: string;
+    processed_records: number;
+    total_records: number;
+    current_stage: string | null;
+  } | null;
 };
 
 const TERMINAL = new Set(["COMPLETED", "NEEDS_REVIEW", "FAILED", "CANCELLED"]);
+
+const LAST_JOB_KEY = "goals-localization:last-job";
+const CLEARED_JOB = "cleared";
+
+const LOG_LEVEL_STYLE: Record<string, string> = {
+  info: "bg-slate-400",
+  success: "bg-emerald-500",
+  warning: "bg-amber-500",
+  error: "bg-rose-500",
+};
 
 const FALLBACK_LANGUAGES: Language[] = [
   { code: "zh", name: "Simplified Chinese", sheet_code: "zh", azure_translator_code: "zh-Hans", rtl: false },
@@ -234,7 +272,69 @@ function StageIcon({ status }: { status: string }) {
       </span>
     );
   }
+  if (status === "cancelled") {
+    return (
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-slate-400 text-[10px] font-bold text-white">
+        –
+      </span>
+    );
+  }
   return <span className="h-4 w-4 shrink-0 rounded-full border-2 border-slate-200 bg-white" />;
+}
+
+function SideDrawer({
+  title,
+  subtitle,
+  onClose,
+  children,
+  wide = false,
+}: {
+  title: string;
+  subtitle?: ReactNode;
+  onClose: () => void;
+  children: ReactNode;
+  wide?: boolean;
+}) {
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end">
+      <button
+        type="button"
+        className="absolute inset-0 bg-slate-900/30"
+        aria-label={`Close ${title}`}
+        onClick={onClose}
+      />
+      <aside
+        className={`relative flex h-full w-full flex-col border-l border-slate-200 bg-white shadow-xl ${
+          wide ? "max-w-xl" : "max-w-md"
+        }`}
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="text-base font-bold text-slate-950">{title}</h2>
+            {subtitle ? <div className="mt-1 text-xs text-slate-500">{subtitle}</div> : null}
+          </div>
+          <button
+            type="button"
+            className="rounded-lg px-2 py-1 text-sm text-slate-500 hover:bg-slate-100"
+            onClick={onClose}
+          >
+            Close
+          </button>
+        </div>
+        <div className="flex min-h-0 flex-1 flex-col">{children}</div>
+      </aside>
+    </div>
+  );
+}
+
+function jobFileUrl(jobId: string, kind: "download" | "report"): string {
+  return `${API_BASE}/api/v1/goals-localization/jobs/${jobId}/${kind}`;
+}
+
+function formatTime(value?: string | null): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
 }
 
 export default function GoalsLocalizationPage() {
@@ -267,21 +367,22 @@ export default function GoalsLocalizationPage() {
     costUsd: number;
   } | null>(null);
   const [estimateAccepted, setEstimateAccepted] = useState(false);
-  const [queue, setQueue] = useState<{
-    busy: boolean;
-    waiting: number;
-    active_count: number;
-    processing: {
-      source_filename: string;
-      processed_records: number;
-      total_records: number;
-      current_stage: string | null;
-    } | null;
-  } | null>(null);
+  const [queue, setQueue] = useState<QueueState | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [job, setJob] = useState<JobPayload | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [logEvents, setLogEvents] = useState<JobEvent[]>([]);
+  const [logsError, setLogsError] = useState<string | null>(null);
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [files, setFiles] = useState<JobPayload[]>([]);
+  const [filesLoading, setFilesLoading] = useState(false);
+  const [filesError, setFilesError] = useState<string | null>(null);
+  const restoredRef = useRef(false);
+  const seenActiveRef = useRef<string | null>(null);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     void fetch(`${API_BASE}/api/v1/auth/me`, { credentials: "include" })
@@ -349,10 +450,98 @@ export default function GoalsLocalizationPage() {
     const response = await fetch(`${API_BASE}/api/v1/goals-localization/jobs/${jobId}`, {
       credentials: "include",
     });
+    if (response.status === 404) {
+      window.localStorage.removeItem(LAST_JOB_KEY);
+      return;
+    }
     if (!response.ok) return;
     const body = await response.json();
     setJob(body.job as JobPayload);
   }, []);
+
+  // After a reload with nothing in the worker, show the last job opened here,
+  // or the newest job on the server if this browser has none.
+  useEffect(() => {
+    if (!queue || restoredRef.current) return;
+    restoredRef.current = true;
+    if (job || queue.active_job_id) return;
+    const jobId = window.localStorage.getItem(LAST_JOB_KEY);
+    if (jobId === CLEARED_JOB) return;
+    if (jobId) {
+      void refreshJob(jobId);
+      return;
+    }
+    void fetch(`${API_BASE}/api/v1/goals-localization/jobs`, { credentials: "include" })
+      .then(async (response) => (response.ok ? response.json() : null))
+      .then((body) => {
+        const latest = (body?.jobs as JobPayload[] | undefined)?.[0];
+        if (latest) setJob((current) => current ?? latest);
+      })
+      .catch(() => undefined);
+  }, [queue, job, refreshJob]);
+
+  // Whenever the worker gets a new job (after a reload, or started in another tab), show it.
+  useEffect(() => {
+    const activeId = queue?.active_job_id ?? null;
+    if (activeId === seenActiveRef.current) return;
+    seenActiveRef.current = activeId;
+    if (!activeId || job?.id === activeId) return;
+    if (job && !TERMINAL.has(job.status)) return;
+    void refreshJob(activeId);
+  }, [queue?.active_job_id, job, refreshJob]);
+
+  useEffect(() => {
+    if (job?.id) window.localStorage.setItem(LAST_JOB_KEY, job.id);
+  }, [job?.id]);
+
+  const loadLogs = useCallback(async (jobId: string) => {
+    const response = await fetch(`${API_BASE}/api/v1/goals-localization/jobs/${jobId}/logs`, {
+      credentials: "include",
+    });
+    if (!response.ok) {
+      setLogsError(await readApiError(response, "Could not load logs."));
+      return;
+    }
+    const body = await response.json();
+    setLogsError(null);
+    setLogEvents((body.events ?? []) as JobEvent[]);
+  }, []);
+
+  useEffect(() => {
+    if (!logsOpen || !job?.id) return;
+    void loadLogs(job.id);
+    if (TERMINAL.has(job.status)) return;
+    const timer = window.setInterval(() => void loadLogs(job.id), 2000);
+    return () => window.clearInterval(timer);
+  }, [logsOpen, job?.id, job?.status, loadLogs]);
+
+  useEffect(() => {
+    if (logsOpen) logEndRef.current?.scrollIntoView({ block: "end" });
+  }, [logsOpen, logEvents]);
+
+  const loadFiles = useCallback(async () => {
+    setFilesLoading(true);
+    setFilesError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/goals-localization/jobs`, { credentials: "include" });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Could not load processed files."));
+      }
+      const body = await response.json();
+      setFiles((body.jobs ?? []) as JobPayload[]);
+    } catch (err) {
+      setFilesError(err instanceof Error ? err.message : "Could not load processed files.");
+    } finally {
+      setFilesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!filesOpen) return;
+    void loadFiles();
+    const timer = window.setInterval(() => void loadFiles(), 10000);
+    return () => window.clearInterval(timer);
+  }, [filesOpen, loadFiles]);
 
   useEffect(() => {
     if (!job?.id || TERMINAL.has(job.status)) return;
@@ -370,7 +559,9 @@ export default function GoalsLocalizationPage() {
 
   const selectedLanguage = languages.find((lang) => lang.code === targetLanguage);
   const optionList = mandatoryOptions.length ? mandatoryOptions : DEFAULT_OPTIONS;
-  const canStart = Boolean(englishFile && targetLanguage && estimateAccepted && !busy);
+  const workerBusy = Boolean(queue?.busy) || Boolean(job && !TERMINAL.has(job.status));
+  const canStart = Boolean(englishFile && targetLanguage && estimateAccepted && !busy && !workerBusy);
+  const processedFiles = useMemo(() => files.filter((item) => item.has_output), [files]);
   const stageList = job?.stages?.length ? job.stages : stages.length ? stages : Object.keys(STAGE_LABELS);
 
   const stageStatuses = useMemo(() => {
@@ -546,10 +737,37 @@ export default function GoalsLocalizationPage() {
       }
       const body = await response.json();
       setJob(body.job as JobPayload);
+      void refreshQueue();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not start localization.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function onCancelQueue() {
+    if (!window.confirm("Cancel the file in the worker queue? Its progress is discarded.")) return;
+    if (!csrfToken()) {
+      setError("Session expired. Sign in again, then retry.");
+      return;
+    }
+    setCancelBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/goals-localization/queue/clear`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "x-csrf-token": csrfToken() },
+      });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Could not cancel the worker queue."));
+      }
+      await refreshQueue();
+      if (job) await refreshJob(job.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not cancel the worker queue.");
+    } finally {
+      setCancelBusy(false);
     }
   }
 
@@ -558,7 +776,17 @@ export default function GoalsLocalizationPage() {
     setFileEstimate(null);
     setEstimateAccepted(false);
     setError(null);
-    setJob(null);
+    // A running job stays on screen; only a finished one is cleared.
+    if (!job || TERMINAL.has(job.status)) {
+      setJob(null);
+      window.localStorage.setItem(LAST_JOB_KEY, CLEARED_JOB);
+    }
+  }
+
+  async function openJob(jobId: string, showLogs = false) {
+    await refreshJob(jobId);
+    setFilesOpen(false);
+    if (showLogs) setLogsOpen(true);
   }
 
   async function onPickFile(file: File | null) {
@@ -628,12 +856,9 @@ export default function GoalsLocalizationPage() {
   }
 
   const badge = job ? jobBadge(job.status, job.production_ready) : null;
-  const excelAvailable = Boolean(
-    job && (completedStages >= 9 || ["COMPLETED", "NEEDS_REVIEW"].includes(job.status)),
-  );
-  const reportAvailable = Boolean(
-    job && (completedStages >= 10 || TERMINAL.has(job.status)),
-  );
+  const excelAvailable = Boolean(job?.has_output);
+  const reportAvailable = Boolean(job?.has_report);
+  const languageName = (code: string) => languages.find((lang) => lang.code === code)?.name ?? code;
 
   return (
     <AppShell email={email} role={role} orgName={orgName}>
@@ -672,13 +897,32 @@ export default function GoalsLocalizationPage() {
             );
           })}
         </ol>
-        <button
-          type="button"
-          className="tm-btn tm-btn-secondary ml-auto !px-3 !py-2 text-sm"
-          onClick={() => void openPrompt()}
-        >
-          Manage prompt
-        </button>
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            className="tm-btn tm-btn-secondary !px-3 !py-2 text-sm"
+            onClick={() => setFilesOpen(true)}
+          >
+            Processed Excel files
+          </button>
+          <button
+            type="button"
+            className="tm-btn tm-btn-secondary !px-3 !py-2 text-sm"
+            onClick={() => setLogsOpen(true)}
+          >
+            Logs
+            {job && !TERMINAL.has(job.status) ? (
+              <span className="ml-1.5 inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-500" aria-hidden />
+            ) : null}
+          </button>
+          <button
+            type="button"
+            className="tm-btn tm-btn-secondary !px-3 !py-2 text-sm"
+            onClick={() => void openPrompt()}
+          >
+            Manage prompt
+          </button>
+        </div>
         </div>
       </div>
 
@@ -925,18 +1169,24 @@ export default function GoalsLocalizationPage() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 border-t border-slate-100 px-4 py-2.5">
+          <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 px-4 py-2.5">
             <button
               type="button"
               className="tm-btn tm-btn-primary !px-3 !py-2 text-sm"
               disabled={!canStart}
+              title={workerBusy ? "The worker is busy with another file." : undefined}
               onClick={() => void onStart()}
             >
-              {busy ? "Starting…" : "Start Localization"}
+              {busy ? "Starting…" : workerBusy ? "Worker busy" : "Start Localization"}
             </button>
             <button type="button" className="tm-btn tm-btn-ghost !px-3 !py-2 text-sm" onClick={onClear}>
               Clear
             </button>
+            {workerBusy ? (
+              <p className="text-[11px] text-slate-500">
+                One file at a time. Wait for the current file to finish, or cancel it.
+              </p>
+            ) : null}
           </div>
         </section>
 
@@ -978,19 +1228,35 @@ export default function GoalsLocalizationPage() {
                 queue?.busy ? "bg-indigo-50 text-indigo-950" : "bg-slate-50 text-slate-600"
               }`}
             >
-              {queue?.busy && queue.processing ? (
-                <p>
-                  Worker is processing {queue.processing.source_filename}: {queue.processing.processed_records.toLocaleString()} of{" "}
-                  {queue.processing.total_records.toLocaleString()} rows.
-                  {queue.waiting > 0 ? ` ${queue.waiting} more file${queue.waiting === 1 ? "" : "s"} waiting.` : ""}
-                </p>
-              ) : queue && queue.waiting > 0 ? (
-                <p>
-                  Worker is idle. {queue.waiting} file{queue.waiting === 1 ? "" : "s"} waiting to start.
-                </p>
-              ) : (
-                <p>No file is in the worker queue.</p>
-              )}
+              <div className="flex items-center justify-between gap-3">
+                {queue?.busy && queue.processing ? (
+                  <p className="min-w-0">
+                    Worker is processing <span className="font-semibold">{queue.processing.source_filename}</span>
+                    {" · "}
+                    {STAGE_LABELS[queue.processing.current_stage ?? ""] ?? formatStatus(queue.processing.status)}
+                    {": "}
+                    {queue.processing.processed_records.toLocaleString()} of{" "}
+                    {queue.processing.total_records.toLocaleString()} rows.
+                    {queue.waiting > 0 ? ` ${queue.waiting} more file${queue.waiting === 1 ? "" : "s"} waiting.` : ""}
+                  </p>
+                ) : queue && queue.waiting > 0 ? (
+                  <p className="min-w-0">
+                    {queue.waiting} file{queue.waiting === 1 ? "" : "s"} waiting for the worker to pick up.
+                  </p>
+                ) : (
+                  <p>No file is in the worker queue.</p>
+                )}
+                {queue?.busy ? (
+                  <button
+                    type="button"
+                    className="shrink-0 rounded-lg border border-rose-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-rose-700 transition hover:bg-rose-50 disabled:opacity-50"
+                    disabled={cancelBusy}
+                    onClick={() => void onCancelQueue()}
+                  >
+                    {cancelBusy ? "Cancelling…" : "Cancel"}
+                  </button>
+                ) : null}
+              </div>
             </div>
             {job?.error_message ? (
               <div className="mb-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
@@ -1039,6 +1305,8 @@ export default function GoalsLocalizationPage() {
                     ? "Completed"
                     : status === "failed"
                       ? "Failed"
+                      : status === "cancelled"
+                        ? "Cancelled"
                       : status === "queued"
                         ? "Queued"
                         : isActive
@@ -1143,6 +1411,196 @@ export default function GoalsLocalizationPage() {
           </div>
         </section>
       </div>
+      {logsOpen ? (
+        <SideDrawer
+          title="Activity log"
+          wide
+          onClose={() => setLogsOpen(false)}
+          subtitle={
+            job ? (
+              <>
+                <span className="font-medium text-slate-700">{job.source_filename}</span>
+                {" · "}
+                {languageName(job.target_language)}
+                {" · "}
+                {jobBadge(job.status, job.production_ready).label}
+                {" · "}
+                {job.processed_records.toLocaleString()} of {job.total_records.toLocaleString()} rows
+                {!TERMINAL.has(job.status) ? " · updates every 2s" : ""}
+              </>
+            ) : (
+              "No job selected."
+            )
+          }
+        >
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+            {!job ? (
+              <p className="text-sm text-slate-500">
+                Start a file, or open one from Processed Excel files, to see what the worker is doing.
+              </p>
+            ) : logsError ? (
+              <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{logsError}</p>
+            ) : logEvents.length === 0 ? (
+              <p className="text-sm text-slate-500">No activity recorded for this job yet.</p>
+            ) : (
+              <ol className="space-y-1.5">
+                {logEvents.map((event, index) => (
+                  <li key={`${event.at}-${index}`} className="flex gap-2.5 rounded-md px-1.5 py-1 text-xs hover:bg-slate-50">
+                    <span
+                      className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${LOG_LEVEL_STYLE[event.level] ?? "bg-slate-400"}`}
+                      aria-hidden
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p
+                        className={`break-words leading-5 ${
+                          event.level === "error"
+                            ? "text-rose-700"
+                            : event.level === "warning"
+                              ? "text-amber-800"
+                              : "text-slate-800"
+                        }`}
+                      >
+                        {event.message}
+                        {event.count && event.count > 1 ? (
+                          <span className="ml-1.5 rounded bg-slate-100 px-1 text-[10px] font-semibold text-slate-500">
+                            ×{event.count}
+                          </span>
+                        ) : null}
+                      </p>
+                      <p className="text-[10px] text-slate-400">
+                        {new Date(event.at).toLocaleTimeString()}
+                        {event.stage ? ` · ${STAGE_LABELS[event.stage] ?? event.stage}` : ""}
+                      </p>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            )}
+            <div ref={logEndRef} />
+          </div>
+          {job && queue?.busy && queue.active_job_id === job.id ? (
+            <div className="border-t border-slate-200 px-4 py-3">
+              <button
+                type="button"
+                className="tm-btn tm-btn-secondary !px-3 !py-2 text-sm text-rose-700"
+                disabled={cancelBusy}
+                onClick={() => void onCancelQueue()}
+              >
+                {cancelBusy ? "Cancelling…" : "Cancel this job"}
+              </button>
+            </div>
+          ) : null}
+        </SideDrawer>
+      ) : null}
+
+      {filesOpen ? (
+        <SideDrawer
+          title="Processed Excel files"
+          wide
+          onClose={() => setFilesOpen(false)}
+          subtitle="Finished jobs for your organization. Files stay here after you close the page."
+        >
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+            {filesError ? (
+              <p className="mb-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{filesError}</p>
+            ) : null}
+            {filesLoading && files.length === 0 ? (
+              <p className="text-sm text-slate-500">Loading…</p>
+            ) : processedFiles.length === 0 ? (
+              <p className="text-sm text-slate-500">No processed Excel files yet.</p>
+            ) : (
+              <ul className="space-y-2.5">
+                {processedFiles.map((item) => {
+                  const itemBadge = jobBadge(item.status, item.production_ready);
+                  const summary = item.summary ?? {};
+                  const cost = item.cost_estimate ?? {};
+                  const durationMs =
+                    item.created_at && item.completed_at
+                      ? Date.parse(item.completed_at) - Date.parse(item.created_at)
+                      : NaN;
+                  const facts: Array<[string, string]> = [
+                    ["Language", languageName(item.target_language)],
+                    ["Mode", (item.options?.qa_mode as string) === "foundry" ? "Foundry" : "Classic"],
+                    ["Rows", item.total_records.toLocaleString()],
+                    ["Started", formatTime(item.created_at)],
+                    ["Finished", formatTime(item.completed_at)],
+                    ["Duration", formatDuration(durationMs)],
+                    [
+                      "Translator characters",
+                      cost.translator_characters_sent != null
+                        ? Number(cost.translator_characters_sent).toLocaleString()
+                        : "—",
+                    ],
+                    [
+                      "Foundry revisions",
+                      summary.corrected_records != null ? String(summary.corrected_records) : "—",
+                    ],
+                    [
+                      "Open issues",
+                      summary.unresolved_issues != null ? String(summary.unresolved_issues) : "—",
+                    ],
+                  ];
+                  return (
+                    <li key={item.id} className="rounded-xl border border-slate-200 p-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-slate-950">
+                            Goals_{item.target_language}_{item.production_ready ? "PRODUCTION" : "NOT_PRODUCTION_READY"}.xlsx
+                          </p>
+                          <p className="truncate text-[11px] text-slate-500">
+                            From {item.source_filename} · Job {item.id.slice(0, 8)}
+                          </p>
+                        </div>
+                        <span
+                          className={`inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${itemBadge.className}`}
+                        >
+                          {itemBadge.label}
+                        </span>
+                      </div>
+                      <dl className="mt-2 grid grid-cols-3 gap-x-3 gap-y-1">
+                        {facts.map(([label, value]) => (
+                          <div key={label} className="min-w-0">
+                            <dt className="text-[10px] uppercase tracking-wide text-slate-400">{label}</dt>
+                            <dd className="truncate text-xs text-slate-800">{value}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                      <div className="mt-2.5 flex flex-wrap gap-1.5">
+                        <a
+                          className={`tm-btn !px-2.5 !py-1.5 text-xs ${item.production_ready ? "tm-btn-primary" : "tm-btn-secondary"}`}
+                          href={jobFileUrl(item.id, "download")}
+                        >
+                          Download Excel
+                        </a>
+                        {item.has_report ? (
+                          <a className="tm-btn tm-btn-secondary !px-2.5 !py-1.5 text-xs" href={jobFileUrl(item.id, "report")}>
+                            QA report
+                          </a>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="tm-btn tm-btn-ghost !px-2.5 !py-1.5 text-xs"
+                          onClick={() => void openJob(item.id)}
+                        >
+                          Show details
+                        </button>
+                        <button
+                          type="button"
+                          className="tm-btn tm-btn-ghost !px-2.5 !py-1.5 text-xs"
+                          onClick={() => void openJob(item.id, true)}
+                        >
+                          Logs
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </SideDrawer>
+      ) : null}
+
       {promptOpen ? (
         <div className="fixed inset-0 z-40 flex justify-end">
           <button

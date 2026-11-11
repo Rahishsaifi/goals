@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     azure_translator_paid_endpoint: str | None = None
     azure_translator_paid_key: str | None = None
     azure_translator_paid_region: str | None = None
+    # Skip the free Translator key entirely and send every batch to the paid key.
+    azure_translator_paid_only: bool = False
     goals_localization_max_upload_mb: int = 50
     goals_localization_translate_batch_size: int = 50
     # Stay under the Translator F0 window of about 33,300 characters per minute.

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import get_settings
 from app.goals_localization.language_config import (
@@ -21,7 +22,7 @@ from app.services.goals_localization.file_validation import (
     FileValidationError,
     validate_english_csv,
 )
-from app.services.goals_localization.pipeline import CONTAINER
+from app.services.goals_localization.pipeline import CONTAINER, log_job_event
 
 EVENT_TYPE = "goals.localization.run"
 
@@ -74,9 +75,21 @@ def clear_active_jobs(db: Session, *, tenant_id: uuid.UUID) -> list[Localization
     job_ids = [job.id for job in jobs]
     for job in jobs:
         job.status = LocalizationJobStatus.cancelled
-        job.current_stage = None
-        job.error_message = "Cleared from the worker queue."
+        job.error_message = "Cancelled from the worker queue."
         job.completed_at = now
+        progress = {
+            stage: (
+                {**info, "status": "cancelled"}
+                if isinstance(info, dict) and info.get("status") == "running"
+                else info
+            )
+            for stage, info in dict(job.stage_progress or {}).items()
+        }
+        job.stage_progress = progress
+        flag_modified(job, "stage_progress")
+        log_job_event(
+            job, "Cancelled from the UI. The worker stops at its next checkpoint.", "warning"
+        )
     events = list(
         db.scalars(
             select(OutboxEvent).where(
@@ -86,6 +99,8 @@ def clear_active_jobs(db: Session, *, tenant_id: uuid.UUID) -> list[Localization
                 OutboxEvent.aggregate_id.in_(job_ids),
                 OutboxEvent.processed_at.is_(None),
             )
+            # The worker holds a lock on the event it is running and marks it itself.
+            .with_for_update(skip_locked=True)
         )
     )
     for event in events:
@@ -174,7 +189,12 @@ def create_job_from_uploads(
         stage_progress={},
         summary={},
         cost_estimate={},
+        events=[],
         total_records=len(sources),
+    )
+    log_job_event(
+        job,
+        f"Uploaded {english.filename} ({len(sources):,} rows) for {language.name}. Waiting for the worker.",
     )
     db.add(job)
     db.add(
@@ -188,6 +208,17 @@ def create_job_from_uploads(
     )
     db.flush()
     return job
+
+
+def list_jobs(db: Session, *, tenant_id: uuid.UUID, limit: int = 50) -> list[LocalizationJob]:
+    return list(
+        db.scalars(
+            select(LocalizationJob)
+            .where(LocalizationJob.tenant_id == tenant_id)
+            .order_by(LocalizationJob.created_at.desc())
+            .limit(limit)
+        )
+    )
 
 
 def get_job(db: Session, *, tenant_id: uuid.UUID, job_id: uuid.UUID) -> LocalizationJob:

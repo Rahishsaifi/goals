@@ -49,6 +49,7 @@ class _MinuteCharacterBudget:
     def __init__(self, limit: int) -> None:
         self.limit = max(1, limit)
         self.sent: list[tuple[float, int]] = []
+        self.on_wait: Callable[[float], None] | None = None
 
     def acquire(self, characters: int) -> None:
         if characters <= 0:
@@ -68,6 +69,8 @@ class _MinuteCharacterBudget:
                 characters,
                 self.limit,
             )
+            if self.on_wait is not None:
+                self.on_wait(wait)
             time.sleep(wait)
 
 
@@ -92,6 +95,25 @@ class AzureTranslatorClient:
         self.chars_per_minute = max(0, chars_per_minute)
         self.budget = _MinuteCharacterBudget(self.chars_per_minute) if self.chars_per_minute else None
         self.fallback = fallback
+        # (level, message) sink for the job activity log.
+        self.notify: Callable[[str, str], None] | None = None
+
+    def set_notify(self, notify: Callable[[str, str], None] | None) -> None:
+        self.notify = notify
+        if self.budget is not None:
+            self.budget.on_wait = (
+                None
+                if notify is None
+                else lambda wait: notify(
+                    "info",
+                    f"Free Translator pacing: waiting {wait:.0f}s "
+                    "to stay under the per-minute character limit.",
+                )
+            )
+
+    def _emit(self, level: str, message: str) -> None:
+        if self.notify is not None:
+            self.notify(level, message)
 
     def _character_chunks(self, items: list[TranslationItem]) -> list[list[TranslationItem]]:
         chunks: list[list[TranslationItem]] = []
@@ -163,6 +185,11 @@ class AzureTranslatorClient:
                         attempt + 1,
                         delay,
                     )
+                    self._emit(
+                        "warning",
+                        f"Translator HTTP {response.status_code}; "
+                        f"retry {attempt + 1}/8 in {delay:.0f}s.",
+                    )
                     time.sleep(delay)
                     last_error = TranslatorError(
                         f"Translator HTTP {response.status_code}: {response.text[:300]}"
@@ -177,6 +204,11 @@ class AzureTranslatorClient:
                             "translator_paid_fallback status=%s to_language=%s",
                             response.status_code,
                             to_language,
+                        )
+                        self._emit(
+                            "warning",
+                            f"Free Translator returned HTTP {response.status_code}; "
+                            "sent this batch to the paid Translator.",
                         )
                         return self.fallback._translate_chunk(
                             chunk, to_language=to_language, from_language=from_language
@@ -201,9 +233,14 @@ class AzureTranslatorClient:
                 return results
             except httpx.HTTPError as exc:
                 last_error = TranslatorError(f"Translator network error: {exc}")
+                self._emit("warning", f"Translator network error; retry {attempt + 1}/8.")
                 time.sleep(min(30.0, 0.5 * (2**attempt)))
         if self.fallback is not None and last_error is not None and "429" in str(last_error):
             logger.warning("translator_paid_fallback to_language=%s", to_language)
+            self._emit(
+                "warning",
+                "Free Translator kept rate limiting; sent this batch to the paid Translator.",
+            )
             return self.fallback._translate_chunk(
                 chunk, to_language=to_language, from_language=from_language
             )
@@ -343,7 +380,20 @@ def build_translator_client(
     paid_key: str | None = None,
     paid_region: str | None = None,
     paid_fallback: bool = False,
+    paid_only: bool = False,
 ) -> AzureTranslatorClient:
+    if paid_only:
+        if not paid_endpoint or not paid_key:
+            raise TranslatorError(
+                "AZURE_TRANSLATOR_PAID_ONLY is on, but AZURE_TRANSLATOR_PAID_ENDPOINT and AZURE_TRANSLATOR_PAID_KEY are not set."
+            )
+        return AzureTranslatorClient(
+            endpoint=paid_endpoint,
+            api_key=paid_key,
+            region=paid_region,
+            batch_size=batch_size,
+            chars_per_minute=0,
+        )
     if not endpoint or not api_key:
         raise TranslatorError(
             "Azure Translator is not configured. Set AZURE_TRANSLATOR_ENDPOINT and AZURE_TRANSLATOR_KEY."

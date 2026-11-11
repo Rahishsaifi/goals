@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import get_settings
 from app.services.goals_localization.glossary_store import (
@@ -51,13 +52,67 @@ logger = logging.getLogger(__name__)
 
 CONTAINER = "goals-localization"
 
+MAX_JOB_EVENTS = 400
+
+STAGE_NAMES = {
+    "file_validation": "File validation",
+    "english_extraction": "English source extraction",
+    "record_reconciliation": "Record reconciliation",
+    "translation": "Translation",
+    "semantic_qa": "Semantic QA",
+    "automatic_correction": "Automatic correction",
+    "technical_validation": "Technical validation",
+    "special_category_validation": "Special category validation",
+    "excel_reconstruction": "Excel reconstruction",
+    "final_hard_gate": "Final hard gate",
+}
+
+
+class LocalizationCancelled(Exception):
+    """The job was cancelled from the UI while the worker was running it."""
+
+
+def log_job_event(job: LocalizationJob, message: str, level: str = "info") -> None:
+    """Append to the job activity log. The caller commits."""
+    events = list(job.events or [])
+    now = datetime.now(UTC).isoformat()
+    last = events[-1] if events else None
+    if last and last.get("message") == message and last.get("level") == level:
+        merged = dict(last)
+        merged["count"] = int(merged.get("count") or 1) + 1
+        merged["at"] = now
+        events[-1] = merged
+    else:
+        events.append(
+            {"at": now, "level": level, "stage": job.current_stage, "message": message}
+        )
+    job.events = events[-MAX_JOB_EVENTS:]
+    flag_modified(job, "events")
+
+
+def _ensure_not_cancelled(db: Session, job: LocalizationJob) -> None:
+    # Read the committed status; pending local changes must not mask a cancel.
+    with db.no_autoflush:
+        current = db.execute(
+            select(LocalizationJob.status).where(LocalizationJob.id == job.id)
+        ).scalar_one_or_none()
+    if current == LocalizationJobStatus.cancelled:
+        raise LocalizationCancelled()
+
 
 def _set_stage(
-    db: Session, job: LocalizationJob, stage: str, status: str, detail: str = ""
+    db: Session,
+    job: LocalizationJob,
+    stage: str,
+    status: str,
+    detail: str = "",
+    *,
+    log: bool = True,
+    check_cancel: bool = True,
 ) -> None:
     """Persist stage progress immediately so the UI can poll live updates."""
-    from sqlalchemy.orm.attributes import flag_modified
-
+    if check_cancel:
+        _ensure_not_cancelled(db, job)
     progress = dict(job.stage_progress or {})
     progress[stage] = {
         "status": status,
@@ -67,6 +122,13 @@ def _set_stage(
     job.stage_progress = progress
     job.current_stage = stage
     flag_modified(job, "stage_progress")
+    if log:
+        verb = {"running": "started"}.get(status, status)
+        level = {"completed": "success", "failed": "error"}.get(status, "info")
+        message = f"{STAGE_NAMES.get(stage, stage)} {verb}"
+        if detail:
+            message += f": {detail}"
+        log_job_event(job, message, level)
     db.commit()
     db.refresh(job)
 
@@ -88,6 +150,12 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
         qa_mode = resolve_qa_mode(str((job.options or {}).get("qa_mode") or "classic"))
         glossary = load_glossary(db, job.tenant_id)
         storage.ensure_container(CONTAINER)
+        log_job_event(
+            job,
+            f"Worker picked up {job.source_filename} → {language.name} "
+            f"({'Foundry' if qa_mode == 'foundry' else 'Classic'} mode, "
+            f"{len(glossary.preserve)} Preserve terms).",
+        )
 
         # 1. File validation / load English CSV (+ generated workbook copy)
         job.status = LocalizationJobStatus.validating
@@ -182,7 +250,18 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
                 paid_key=settings.azure_translator_paid_key,
                 paid_region=settings.azure_translator_paid_region,
                 paid_fallback=paid_translator_enabled(db, job.tenant_id),
+                paid_only=settings.azure_translator_paid_only,
             )
+            def _translator_event(level: str, message: str) -> None:
+                _ensure_not_cancelled(db, job)
+                log_job_event(job, message, level)
+                db.commit()
+
+            client.set_notify(_translator_event)
+            if settings.azure_translator_paid_only:
+                log_job_event(job, "Using the paid Translator only (free key skipped).")
+            elif client.fallback is not None:
+                log_job_event(job, "Paid Translator fallback is on for this job.")
             translator = CachedTranslator(client, db, tenant_id=job.tenant_id)
             payload = [
                 {
@@ -193,8 +272,18 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
                 }
                 for rec in record_rows
             ]
+            total_rows = max(1, len(record_rows))
+            logged_bucket = {"value": -1}
+
             def _row_progress(count: int) -> None:
+                _ensure_not_cancelled(db, job)
                 job.processed_records = count
+                percent = int(count * 100 / total_rows)
+                if percent // 10 != logged_bucket["value"]:
+                    logged_bucket["value"] = percent // 10
+                    log_job_event(
+                        job, f"Translated {count:,} of {len(record_rows):,} rows ({percent}%)."
+                    )
                 db.commit()
 
             translated = translator.translate_fields(
@@ -214,6 +303,11 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
                 "translator_characters_sent": translator.characters_sent,
                 "translator_cache_hits": translator.cache_hits,
             }
+            log_job_event(
+                job,
+                f"Translator sent {translator.characters_sent:,} characters; "
+                f"{translator.cache_hits:,} fields reused from cache.",
+            )
             translation_detail = "Protected terminology + Azure Translator"
         else:
             for rec in record_rows:
@@ -263,7 +357,28 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
             qa = build_semantic_qa_service()
             semantic_prompt, _custom = load_semantic_prompt(db, job.tenant_id)
             _set_stage(db, job, "automatic_correction", "running")
+            review_total = len(record_rows)
+            log_job_event(job, f"Foundry is reviewing {review_total:,} rows for meaning.")
+            skipped_rows = 0
+            review_bucket = -1
             for index, rec in enumerate(record_rows):
+                if index and index % 10 == 0:
+                    percent = int(index * 100 / max(1, review_total))
+                    if percent // 10 != review_bucket:
+                        review_bucket = percent // 10
+                        log_job_event(
+                            job,
+                            f"Foundry reviewed {index:,} of {review_total:,} rows ({percent}%); "
+                            f"{corrected_count} fields revised so far.",
+                        )
+                    _set_stage(
+                        db,
+                        job,
+                        "semantic_qa",
+                        "running",
+                        f"{index:,}/{review_total:,} rows reviewed",
+                        log=False,
+                    )
                 if index:
                     # Soft throttle to stay inside low TPM quotas between records.
                     time.sleep(0.4)
@@ -290,6 +405,12 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
                     rec.qa_status = "needs_human_review"
                     rec.translation_status = LocalizationRecordStatus.needs_human_review
                     unresolved_high += 1
+                    skipped_rows += 1
+                    log_job_event(
+                        job,
+                        f"Foundry skipped row {rec.source_record_key}: {str(exc)[:160]}",
+                        "warning",
+                    )
                     db.add(
                         LocalizationQAResult(
                             job_id=job.id,
@@ -348,7 +469,13 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
                 "semantic_qa_output_tokens": qa.output_tokens,
                 "qa_mode": qa_mode,
             }
-            _set_stage(db, job, "semantic_qa", "completed")
+            log_job_event(
+                job,
+                f"Foundry finished: {corrected_count} fields revised, {skipped_rows} rows skipped, "
+                f"{qa.input_tokens:,} input / {qa.output_tokens:,} output tokens.",
+                "warning" if skipped_rows else "info",
+            )
+            _set_stage(db, job, "semantic_qa", "completed", f"{review_total:,} rows reviewed")
             _set_stage(
                 db,
                 job,
@@ -437,7 +564,11 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
                             explanation=hit.message,
                         )
                     )
-        _set_stage(db, job, "technical_validation", "completed")
+        technical_detail = (
+            f"{numeric + percent} number, {quarters + dates} date/quarter, "
+            f"{unresolved_terms} terminology, {unresolved_english} untranslated-English issues"
+        )
+        _set_stage(db, job, "technical_validation", "completed", technical_detail)
 
         # 8. Special category QA
         _set_stage(db, job, "special_category_validation", "running")
@@ -507,7 +638,13 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
         )
         job.output_blob_name = out_name
         workbook_ok = True
-        _set_stage(db, job, "excel_reconstruction", "completed")
+        _set_stage(
+            db,
+            job,
+            "excel_reconstruction",
+            "completed",
+            f"{output_filename(language.code)} saved ({len(write_rows):,} rows)",
+        )
 
         # 10. Hard gate
         job.status = LocalizationJobStatus.final_validation
@@ -601,7 +738,14 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
             content_type="application/json",
         )
         job.report_blob_name = report_name
-        _set_stage(db, job, "final_hard_gate", "completed")
+        failed_checks = [c.name for c in gate.checks if not c.passed]
+        _set_stage(
+            db,
+            job,
+            "final_hard_gate",
+            "completed",
+            "passed" if gate.production_ready else f"did not pass ({', '.join(failed_checks)})",
+        )
 
         if gate.production_ready:
             job.status = LocalizationJobStatus.completed
@@ -610,15 +754,41 @@ def process_localization_job(db: Session, *, job_id: uuid.UUID, storage: BlobSto
         else:
             job.status = LocalizationJobStatus.completed
         job.completed_at = datetime.now(UTC)
+        log_job_event(
+            job,
+            "Job finished. Production-ready Excel is available."
+            if gate.production_ready
+            else "Job finished. Diagnostic Excel is available; hard gate did not pass.",
+            "success" if gate.production_ready else "warning",
+        )
         db.flush()
+        return job
+    except LocalizationCancelled:
+        db.rollback()
+        db.refresh(job)
+        log_job_event(job, "Worker stopped: job was cancelled.", "warning")
+        db.commit()
         return job
     except (TranslatorError, Exception) as exc:
         logger.exception("localization_job_failed job_id=%s", job_id)
+        db.rollback()
+        db.refresh(job)
+        if job.status == LocalizationJobStatus.cancelled:
+            return job
         job.status = LocalizationJobStatus.failed
         job.error_message = str(exc)[:2000]
         job.production_ready = False
         job.completed_at = datetime.now(UTC)
+        log_job_event(job, f"Job failed: {job.error_message[:300]}", "error")
         if job.current_stage:
-            _set_stage(db, job, job.current_stage, "failed", job.error_message)
+            _set_stage(
+                db,
+                job,
+                job.current_stage,
+                "failed",
+                job.error_message,
+                log=False,
+                check_cancel=False,
+            )
         db.flush()
         return job
