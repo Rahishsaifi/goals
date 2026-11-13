@@ -19,6 +19,8 @@ from app.models.goals_localization import (
     LocalizationJob,
     LocalizationJobStatus,
     LocalizationQAResult,
+    LocalizationRecord,
+    LocalizationRecordStatus,
 )
 from app.services.goals_localization.csv_reader import read_english_csv
 from app.services.goals_localization.excel_generator import build_workbook_from_sources
@@ -122,6 +124,7 @@ def create_job_from_uploads(
     english_filename: str,
     english_bytes: bytes,
     qa_mode: str | None = None,
+    nl_quality_v2: bool = False,
     storage: BlobStorage | None = None,
 ) -> LocalizationJob:
     settings = get_settings()
@@ -182,6 +185,9 @@ def create_job_from_uploads(
     options: dict[str, object] = {key: True for key in MANDATORY_OPTIONS}
     options["qa_mode"] = mode
     options["run_semantic_qa"] = mode == "foundry"
+    if nl_quality_v2:
+        # Option name is historical (started as Dutch-only); applies to all languages.
+        options["nl_quality_v2"] = True
     job = LocalizationJob(
         id=job_id,
         tenant_id=tenant_id,
@@ -205,6 +211,135 @@ def create_job_from_uploads(
         "Waiting for the worker.",
     )
     db.add(job)
+    db.add(
+        OutboxEvent(
+            tenant_id=tenant_id,
+            event_type=EVENT_TYPE,
+            aggregate_type="localization_job",
+            aggregate_id=job.id,
+            payload={"job_id": str(job.id), "tenant_id": str(tenant_id)},
+        )
+    )
+    db.flush()
+    return job
+
+
+def create_version_from_job(
+    db: Session,
+    *,
+    tenant_id: uuid.UUID,
+    user_id: uuid.UUID,
+    parent_job_id: uuid.UUID,
+    qa_mode: str | None = None,
+    nl_quality_v2: bool = False,
+    storage: BlobStorage | None = None,
+) -> LocalizationJob:
+    """Create a new job that reuses the parent's translations (no Translator call)."""
+    if tenant_has_active_job(db, tenant_id=tenant_id) is not None:
+        raise GoalsLocalizationError(
+            "queue_busy",
+            "Another Goals file is already in the worker. "
+            "Wait for it to finish, or clear the queue first.",
+            409,
+        )
+    parent = get_job(db, tenant_id=tenant_id, job_id=parent_job_id)
+    if parent.status not in {
+        LocalizationJobStatus.completed,
+        LocalizationJobStatus.needs_review,
+    }:
+        raise GoalsLocalizationError(
+            "parent_not_ready",
+            "Only a completed or needs-review job can be reused for a new version.",
+            400,
+        )
+    parent_records = list(
+        db.scalars(
+            select(LocalizationRecord)
+            .where(
+                LocalizationRecord.job_id == parent.id,
+                LocalizationRecord.tenant_id == tenant_id,
+            )
+            .order_by(LocalizationRecord.template_row_index)
+        )
+    )
+    if not parent_records or not any(rec.translated_goal for rec in parent_records):
+        raise GoalsLocalizationError(
+            "no_translation",
+            "This job has no reusable translations yet.",
+            400,
+        )
+    try:
+        mode = resolve_qa_mode(qa_mode or str((parent.options or {}).get("qa_mode") or "foundry"))
+    except ValueError as exc:
+        raise GoalsLocalizationError("invalid_qa_mode", str(exc), 400) from exc
+    storage = storage or BlobStorage()
+    storage.ensure_container(CONTAINER)
+    job_id = uuid.uuid4()
+    source_blob = f"{tenant_id}/{job_id}/source/{parent.source_filename}"
+    template_blob = f"{tenant_id}/{job_id}/template/{parent.template_filename or 'Goals_en.xlsx'}"
+    storage.upload_bytes(
+        container=CONTAINER,
+        blob_name=source_blob,
+        data=storage.download_bytes(container=CONTAINER, blob_name=parent.source_blob_name),
+        content_type="text/csv",
+    )
+    storage.upload_bytes(
+        container=CONTAINER,
+        blob_name=template_blob,
+        data=storage.download_bytes(container=CONTAINER, blob_name=parent.template_blob_name),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    options: dict[str, object] = {key: True for key in MANDATORY_OPTIONS}
+    options["qa_mode"] = mode
+    options["run_semantic_qa"] = mode == "foundry"
+    options["reuse_translation"] = True
+    options["parent_job_id"] = str(parent.id)
+    if nl_quality_v2:
+        options["nl_quality_v2"] = True
+
+    job = LocalizationJob(
+        id=job_id,
+        tenant_id=tenant_id,
+        created_by_user_id=user_id,
+        target_language=parent.target_language,
+        source_blob_name=source_blob,
+        template_blob_name=template_blob,
+        source_filename=parent.source_filename,
+        template_filename=parent.template_filename,
+        status=LocalizationJobStatus.uploaded,
+        options=options,
+        stage_progress={},
+        summary={},
+        cost_estimate={},
+        events=[],
+        total_records=len(parent_records),
+    )
+    log_job_event(
+        job,
+        f"New version from job {parent.id}. Reusing {len(parent_records):,} translations "
+        f"(Translator skipped). QA mode={mode}"
+        + (", quality v2 on." if nl_quality_v2 else "."),
+    )
+    db.add(job)
+    for parent_rec in parent_records:
+        db.add(
+            LocalizationRecord(
+                job_id=job.id,
+                tenant_id=tenant_id,
+                source_record_key=parent_rec.source_record_key,
+                template_row_index=parent_rec.template_row_index,
+                source_goal=parent_rec.source_goal,
+                source_description=parent_rec.source_description,
+                source_kra=parent_rec.source_kra,
+                translated_goal=parent_rec.translated_goal,
+                translated_description=parent_rec.translated_description,
+                translated_kra=parent_rec.translated_kra,
+                technical_fields=dict(parent_rec.technical_fields or {}),
+                translation_status=LocalizationRecordStatus.translated,
+                source_hashes=dict(parent_rec.source_hashes or {}),
+            )
+        )
     db.add(
         OutboxEvent(
             tenant_id=tenant_id,

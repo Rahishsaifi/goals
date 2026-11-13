@@ -3,10 +3,11 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.api.deps import DbSession, require_csrf, require_roles
 from app.core.config import get_settings
@@ -46,6 +47,7 @@ from app.services.goals_localization.issue_rows import (
     issue_rows_filename,
 )
 from app.services.goals_localization.pipeline import CONTAINER
+from app.services.goals_localization.workbook_preview import preview_workbook
 
 router = APIRouter(prefix="/goals-localization", tags=["goals-localization"])
 
@@ -80,6 +82,11 @@ class ReviewRequest(BaseModel):
     status: Literal["approved", "rejected", "edited"]
     justification: str = Field(min_length=1)
     edited_text: str | None = None
+
+
+class CreateVersionRequest(BaseModel):
+    qa_mode: Literal["classic", "foundry"] = "foundry"
+    nl_quality_v2: bool = False
 
 
 def _storage() -> BlobStorage:
@@ -120,7 +127,12 @@ def _job_list_item(job: LocalizationJob) -> dict[str, object]:
         "id": str(job.id),
         "status": job.status.value if hasattr(job.status, "value") else str(job.status),
         "target_language": job.target_language,
-        "options": {"qa_mode": options.get("qa_mode")},
+        "options": {
+            "qa_mode": options.get("qa_mode"),
+            "nl_quality_v2": bool(options.get("nl_quality_v2")),
+            "reuse_translation": bool(options.get("reuse_translation")),
+            "parent_job_id": options.get("parent_job_id"),
+        },
         "summary": {
             key: summary.get(key) for key in ("corrected_records", "unresolved_issues")
         },
@@ -401,6 +413,7 @@ async def create_job(
     target_language: str = Form(...),
     english_csv: UploadFile = File(...),
     qa_mode: str = Form(DEFAULT_QA_MODE),
+    nl_quality_v2: str = Form("false"),
 ) -> dict[str, object]:
     if auth.tenant_id is None:
         raise HTTPException(status_code=403, detail="Tenant context required.")
@@ -413,6 +426,7 @@ async def create_job(
             english_filename=english_csv.filename or "goals.csv",
             english_bytes=await english_csv.read(),
             qa_mode=qa_mode,
+            nl_quality_v2=nl_quality_v2.strip().lower() in {"1", "true", "yes", "on"},
             storage=_storage(),
         )
         db.commit()
@@ -423,6 +437,42 @@ async def create_job(
         db.rollback()
         raise HTTPException(
             status_code=500, detail=f"Could not create localization job: {exc}"
+        ) from exc
+    return {"job": _job_payload(job)}
+
+
+@router.post("/jobs/{job_id}/versions")
+def create_job_version(
+    job_id: uuid.UUID,
+    payload: CreateVersionRequest,
+    db: DbSession,
+    auth: Annotated[AuthContext, Depends(require_csrf)],
+    _: Annotated[
+        AuthContext,
+        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter)),
+    ],
+) -> dict[str, object]:
+    """Reuse this job's translations and run a new Foundry/QA pass (no Translator)."""
+    if auth.tenant_id is None:
+        raise HTTPException(status_code=403, detail="Tenant context required.")
+    try:
+        job = job_service.create_version_from_job(
+            db,
+            tenant_id=auth.tenant_id,
+            user_id=auth.user_id,
+            parent_job_id=job_id,
+            qa_mode=payload.qa_mode,
+            nl_quality_v2=payload.nl_quality_v2,
+            storage=_storage(),
+        )
+        db.commit()
+    except job_service.GoalsLocalizationError as exc:
+        db.rollback()
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500, detail=f"Could not create localization version: {exc}"
         ) from exc
     return {"job": _job_payload(job)}
 
@@ -574,6 +624,89 @@ def download_workbook(
     )
 
 
+@router.get("/jobs/{job_id}/workbook-preview")
+def workbook_preview(
+    job_id: uuid.UUID,
+    db: DbSession,
+    auth: Annotated[
+        AuthContext,
+        Depends(require_roles(MembershipRole.tenant_admin, MembershipRole.recruiter)),
+    ],
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    q: Annotated[str, Query(max_length=200)] = "",
+    issues_only: Annotated[bool, Query()] = False,
+) -> dict[str, object]:
+    """Paginated sheet preview for the in-app Excel viewer."""
+    if auth.tenant_id is None:
+        raise HTTPException(status_code=403, detail="Tenant context required.")
+    try:
+        job = job_service.get_job(db, tenant_id=auth.tenant_id, job_id=job_id)
+    except job_service.GoalsLocalizationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    if not job.output_blob_name:
+        raise HTTPException(status_code=404, detail="Workbook not available yet.")
+    label = "PRODUCTION" if job.production_ready else "NOT_PRODUCTION_READY"
+    filename = f"Goals_{job.target_language}_{label}.xlsx"
+    issue_meta = _open_issue_rows(db, tenant_id=auth.tenant_id, job_id=job.id)
+    only_rows = list(issue_meta.keys()) if issues_only else None
+    if issues_only and not only_rows:
+        preview = {
+            "sheet_name": "",
+            "headers": [],
+            "rows": [],
+            "total_rows": 0,
+            "offset": offset,
+            "limit": limit,
+            "q": q,
+        }
+    else:
+        data = _storage().download_bytes(container=CONTAINER, blob_name=job.output_blob_name)
+        preview = preview_workbook(
+            data, offset=offset, limit=limit, q=q, only_excel_rows=only_rows
+        )
+    preview["filename"] = filename
+    preview["job_id"] = str(job.id)
+    preview["issues_only"] = issues_only
+    preview["issue_rows"] = [
+        {
+            "excel_row": excel_row,
+            "issue_count": meta["count"],
+            "issue_types": meta["types"],
+        }
+        for excel_row, meta in sorted(issue_meta.items())
+    ]
+    return preview
+
+
+def _open_issue_rows(
+    db: Session, *, tenant_id: uuid.UUID, job_id: uuid.UUID
+) -> dict[int, dict[str, object]]:
+    """Excel row → open non-LOW issue count/types (same scope as hard-gate samples)."""
+    rows = db.execute(
+        select(LocalizationRecord.template_row_index, LocalizationQAResult.issue_type)
+        .join(LocalizationRecord, LocalizationRecord.id == LocalizationQAResult.record_id)
+        .where(
+            LocalizationQAResult.job_id == job_id,
+            LocalizationQAResult.tenant_id == tenant_id,
+            LocalizationQAResult.reviewer_status == "open",
+            LocalizationQAResult.severity != "LOW",
+        )
+    ).all()
+    result: dict[int, dict[str, object]] = {}
+    for row_index, issue_type in rows:
+        if not row_index:
+            continue
+        excel_row = int(row_index)
+        entry = result.setdefault(excel_row, {"count": 0, "types": []})
+        entry["count"] = int(entry["count"]) + 1
+        types = entry["types"]
+        assert isinstance(types, list)
+        if issue_type and issue_type not in types:
+            types.append(issue_type)
+    return result
+
+
 @router.get("/jobs/{job_id}/issue-rows")
 def download_issue_rows(
     job_id: uuid.UUID,
@@ -650,14 +783,23 @@ def list_issues(
     if auth.tenant_id is None:
         raise HTTPException(status_code=403, detail="Tenant context required.")
     try:
-        issues = job_service.list_open_issues(db, tenant_id=auth.tenant_id, job_id=job_id)
+        job_service.get_job(db, tenant_id=auth.tenant_id, job_id=job_id)
     except job_service.GoalsLocalizationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    rows = db.execute(
+        select(LocalizationQAResult, LocalizationRecord.template_row_index)
+        .join(LocalizationRecord, LocalizationRecord.id == LocalizationQAResult.record_id)
+        .where(
+            LocalizationQAResult.job_id == job_id,
+            LocalizationQAResult.tenant_id == auth.tenant_id,
+        )
+    ).all()
     return {
         "issues": [
             {
                 "id": str(item.id),
                 "record_id": str(item.record_id),
+                "excel_row": int(row_index) if row_index else None,
                 "field_name": item.field_name,
                 "issue_type": item.issue_type,
                 "severity": item.severity,
@@ -668,7 +810,7 @@ def list_issues(
                 "reviewer_status": item.reviewer_status,
                 "reviewer_justification": item.reviewer_justification,
             }
-            for item in issues
+            for item, row_index in rows
         ]
     }
 

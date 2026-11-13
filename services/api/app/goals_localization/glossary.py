@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-GLOSSARY_VERSION = "2026-11-v3"
+GLOSSARY_VERSION = "2026-11-v4"
 
 # Preserve these tokens exactly in the target language (business proper nouns / acronyms).
 PRESERVE_TERMS: tuple[str, ...] = (
@@ -37,6 +37,7 @@ ENGLISH_ALLOWLIST: frozenset[str] = frozenset(
         "CEO",
         "CFO",
         "CTO",
+        # Named EHS system only — ordinary team/service phrases must be translated.
     }
 )
 

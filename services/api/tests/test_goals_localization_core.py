@@ -113,6 +113,33 @@ def test_structural_tokens_are_held_for_translation() -> None:
     assert restore_terminology(protected.text, protected.mapping) == source
 
 
+def test_pipe_separated_missing_quarter_all_languages() -> None:
+    source = (
+        "By Q1, identify the applicable implementations. "
+        "| By Q3, put repeatable configuration into use."
+    )
+    chinese = "确定适用的实现。 | 在Q3之前投入可重复配置。"
+    german = (
+        "Identifizieren Sie die anwendbaren Implementierungen. "
+        "| bis Q3 setzen Sie wiederholbare Konfigurationen ein."
+    )
+    dutch = (
+        "identificeer je de toepasselijke implementaties. "
+        "| Uiterlijk in Q3 neem je herhaalbare configuratie in gebruik."
+    )
+
+    zh = repair_translation(source, chinese, "zh-Hans")
+    de = repair_translation(source, german, "de")
+    nl = repair_translation(source, dutch, "nl")
+
+    assert "Q1" in zh.split("|", 1)[0]
+    assert "在Q1之前" in zh
+    assert "Q1" in de.split("|", 1)[0]
+    assert de.lower().startswith("bis q1")
+    assert "Uiterlijk in Q1" in nl or "uiterlijk in Q1" in nl
+    assert "Q1" in nl.split("|", 1)[0]
+
+
 def test_by_quarter_is_repaired_in_chinese_and_german() -> None:
     source = (
         "1. By Q2, select a workflow. 2. By Q3, put it into use. "
@@ -132,8 +159,103 @@ def test_by_quarter_is_repaired_in_chinese_and_german() -> None:
     german = "1. Identifizieren Sie Q2 einen wiederkehrenden Schritt."
     german_source = "1. By Q2, identify a recurring step."
     fixed = repair_translation(german_source, german, "de")
-    assert fixed.startswith("1. bis Q2 ")
+    # The quarter is completed where it stands. Nothing is moved.
+    assert fixed == "1. Identifizieren Sie bis Q2 einen wiederkehrenden Schritt."
     assert find_meaning_defects(german_source, fixed, "de") == []
+
+
+_NUMBERED_SOURCE = (
+    "1. By Q2, establish a baseline.\n2. By Q3, put the workflow into use.\n"
+    "3. By Q4, verify that the improvement holds."
+)
+
+
+def test_correct_deadlines_are_returned_unchanged() -> None:
+    """Repairs may only add what is missing. Good text must not be touched."""
+    correct = {
+        "zh-Hans": (
+            "1. 在Q2之前建立基线。\n2. 到Q3将工作流程投入使用。\n"
+            "3. 在Q4之前验证改进是否持续。"
+        ),
+        "ja": (
+            "1. Q2までにベースラインを確立する。\n2. Q3までにワークフローを導入する。\n"
+            "3. Q4までに改善が維持されていることを確認する。"
+        ),
+        "de": (
+            "1. Legen Sie bis Q2 eine Ausgangsbasis fest.\n"
+            "2. Führen Sie den Workflow spätestens Q3 ein.\n"
+            "3. Bis Q4 überprüfen Sie, ob die Verbesserung anhält."
+        ),
+        "nl": (
+            "1. Stel uiterlijk in Q2 een basislijn vast.\n"
+            "2. Neem de workflow uiterlijk in Q3 in gebruik.\n"
+            "3. Verifieer uiterlijk in Q4 dat de verbetering standhoudt."
+        ),
+        "fr": (
+            "1. Établir une base de référence d'ici Q2.\n"
+            "2. Mettre le flux de travail en service avant Q3.\n"
+            "3. D'ici Q4, vérifier que l'amélioration se maintient."
+        ),
+        "es": (
+            "1. Establecer una línea de base antes de Q2.\n"
+            "2. Poner en uso el flujo de trabajo para Q3.\n"
+            "3. Antes de Q4, verificar que la mejora se mantiene."
+        ),
+    }
+    for language, text in correct.items():
+        for restore in (False, True):
+            fixed = repair_translation(
+                _NUMBERED_SOURCE, text, language, restore_measures=restore
+            )
+            assert fixed == text, (language, restore)
+        assert find_meaning_defects(_NUMBERED_SOURCE, text, language) == [], language
+
+
+def test_quarter_inside_a_time_expression_is_left_alone() -> None:
+    # "in Q2" already states the quarter; wrapping it would give "in uiterlijk in Q2".
+    dutch = "1. Stel in Q2 een basislijn vast."
+    assert repair_translation("1. By Q2, establish a baseline.", dutch, "nl") == dutch
+    chinese = "1. 建立Q2的基线。"
+    assert repair_translation("1. By Q2, establish a baseline.", chinese, "zh-Hans") == chinese
+
+
+def test_dropped_quarter_is_added_once_per_step() -> None:
+    german = (
+        "1. Legen Sie eine Ausgangsbasis fest.\n"
+        "2. Führen Sie den Workflow bis Q3 ein.\n"
+        "3. Überprüfen Sie, ob die Verbesserung anhält."
+    )
+    fixed = repair_translation(_NUMBERED_SOURCE, german, "de")
+    assert fixed == (
+        "1. Bis Q2 Legen Sie eine Ausgangsbasis fest.\n"
+        "2. Führen Sie den Workflow bis Q3 ein.\n"
+        "3. Bis Q4 Überprüfen Sie, ob die Verbesserung anhält."
+    )
+    assert repair_translation(_NUMBERED_SOURCE, fixed, "de") == fixed
+    assert find_meaning_defects(_NUMBERED_SOURCE, fixed, "de") == []
+
+    chinese = "1. 建立基线。2. 在Q3之前将工作流程投入使用。3. 验证改进是否持续。"
+    fixed_zh = repair_translation(_NUMBERED_SOURCE, chinese, "zh-Hans")
+    assert fixed_zh == (
+        "1. 在Q2之前建立基线。2. 在Q3之前将工作流程投入使用。"
+        "3. 在Q4之前验证改进是否持续。"
+    )
+
+
+def test_restore_measures_only_adds_line_breaks() -> None:
+    joined = (
+        "1. Stel uiterlijk in Q2 een basislijn vast. 2. Neem de workflow uiterlijk in Q3 "
+        "in gebruik.3. Verifieer uiterlijk in Q4 dat 2.5 uur winst standhoudt."
+    )
+    fixed = repair_translation(_NUMBERED_SOURCE, joined, "nl", restore_measures=True)
+    assert fixed == (
+        "1. Stel uiterlijk in Q2 een basislijn vast.\n2. Neem de workflow uiterlijk in Q3 "
+        "in gebruik.\n3. Verifieer uiterlijk in Q4 dat 2.5 uur winst standhoudt."
+    )
+    # A step number that cannot be found means the structure is unknown: no change.
+    broken = "Stel uiterlijk in Q2 een basislijn vast en neem de workflow in gebruik."
+    source = "1. Do this. 2. Do that."
+    assert repair_translation(source, broken, "nl", restore_measures=True) == broken
 
 
 def test_preserve_protects_allow_english_only_skips_residual_qa() -> None:

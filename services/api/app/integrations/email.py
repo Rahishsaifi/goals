@@ -22,8 +22,13 @@ def email_configured() -> bool:
     return bool(settings.azure_communication_connection_string and settings.email_sender_address)
 
 
-def send_email(message: EmailMessage, *, timeout_seconds: int = 60) -> str:
-    """Send through Azure Communication Services Email and return the operation id."""
+def send_email(message: EmailMessage, *, timeout_seconds: int = 15) -> str:
+    """Send through Azure Communication Services Email and return the operation id.
+
+    ACS often returns status ``Running`` while delivery is still in flight.
+    That means the send was accepted — do not treat it as failure, and do not
+    block the localization worker on a long poll.
+    """
     settings = get_settings()
     if not settings.azure_communication_connection_string or not settings.email_sender_address:
         raise EmailNotConfiguredError("Azure Communication Services Email is not configured.")
@@ -41,8 +46,21 @@ def send_email(message: EmailMessage, *, timeout_seconds: int = 60) -> str:
             },
         }
     )
-    result = poller.result(timeout=timeout_seconds)
-    status = str(result.get("status", ""))
-    if status.lower() != "succeeded":
-        raise RuntimeError(f"Email send ended with status {status or 'unknown'}.")
-    return str(result.get("id", ""))
+    result: dict[str, object]
+    try:
+        raw = poller.result(timeout=timeout_seconds)
+        result = dict(raw) if raw else {}
+    except Exception as exc:
+        # Timed out waiting for final delivery — still accepted if we have an id.
+        operation_id = str(getattr(poller, "id", "") or "")
+        if operation_id:
+            return operation_id
+        raise RuntimeError(f"Email send did not complete: {exc}") from exc
+
+    status = str(result.get("status", "")).lower()
+    operation_id = str(result.get("id", "") or getattr(poller, "id", "") or "")
+    if status in {"succeeded", "running", "notstarted"} and operation_id:
+        return operation_id
+    if status == "succeeded":
+        return operation_id
+    raise RuntimeError(f"Email send ended with status {status or 'unknown'}.")

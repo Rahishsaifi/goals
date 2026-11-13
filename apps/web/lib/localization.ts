@@ -44,6 +44,7 @@ export const STAGE_LABELS: Record<string, string> = {
   special_category_validation: "Special category validation",
   excel_reconstruction: "Excel reconstruction",
   final_hard_gate: "Final hard gate",
+  english_issue_repair: "Repair untranslated English",
 };
 
 export const STAGE_ORDER = Object.keys(STAGE_LABELS);

@@ -77,4 +77,13 @@ def evaluate_hard_gate(summary: dict[str, object]) -> HardGateResult:
     add("Workbook post-save integrity", "PASS", workbook_ok, workbook_ok)
     add("Unresolved untranslated English", "0", unresolved_english, unresolved_english == 0)
 
+    # Dutch v2 checks are only present when nl_quality_v2 ran for this job.
+    if "nl_stacked_deadline_violations" in summary:
+        stacked = _count(summary.get("nl_stacked_deadline_violations"))
+        joined = _count(summary.get("nl_joined_kra_number_violations"))
+        losen = _count(summary.get("nl_losen_violations"))
+        add("Dutch stacked deadline templates", "0", stacked, stacked == 0)
+        add("Dutch joined KRA measure numbers", "0", joined, joined == 0)
+        add("Dutch Losen spelling errors", "0", losen, losen == 0)
+
     return HardGateResult(production_ready=all(item.passed for item in checks), checks=checks)

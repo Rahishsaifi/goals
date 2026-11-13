@@ -17,6 +17,7 @@ _PROMPTS_DIR = Path(__file__).resolve().parents[2] / "goals_localization" / "pro
 _PROMPT_PATH = _PROMPTS_DIR / "semantic_translation_qa.txt"
 _CORRECTION_PATH = _PROMPTS_DIR / "translation_correction.txt"
 _REVISION_PATH = _PROMPTS_DIR / "semantic_revision.txt"
+_RESIDUAL_ENGLISH_PATH = _PROMPTS_DIR / "residual_english_rework.txt"
 
 
 class QAIssue(BaseModel):
@@ -57,6 +58,50 @@ class RecordRevision(BaseModel):
 
 def _load_prompt(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+# Appended to every revision prompt, including a tenant's saved Manage Prompt.
+# The saved prompt describes the terminology rules; this states them against
+# the exact lists sent in the request so the model cannot extend them.
+TERMINOLOGY_CONTRACT = """
+TERMINOLOGY CONTRACT (enforced by the system, overrides anything above that conflicts)
+
+The request carries two lists:
+- "preserve_terms": keep exactly as written.
+- "allow_english_terms": may stay in English.
+
+These two lists are COMPLETE. No other English word or phrase is a preserved
+term, a product name, or an accepted loan phrase, whatever it looks like.
+
+1. Every word that is not on one of the two lists must be in the target
+   language. Role names, team names, process names and business phrases such
+   as "delivery owners", "business owners", "business reviews",
+   "post-launch service" or "in-scope service" are ordinary English and must
+   be translated. The same holds for descriptive names of systems,
+   programmes and frameworks such as "Environmental Health and Safety
+   Management System": translate the whole name. Do not mix languages inside
+   one name or one compound word (not "delivery-eigenaren").
+   Keep abbreviations exactly as the source writes them (for example EHSMS);
+   do not expand them.
+2. Never repair a wrong or awkward translation by copying the English source
+   wording into it. Write a better target-language wording instead.
+3. Never state in "reason" that a phrase was kept in English unless that
+   exact phrase is in "preserve_terms" or "allow_english_terms".
+4. If the current translation already contains ordinary English that is not
+   on the lists, translate it, set "changed" to true, and return the full
+   corrected field.
+5. Leave a deadline that is already expressed correctly where it is. Do not
+   repeat it and do not add a second one.
+"""
+
+
+def _terminology_user_fields(
+    preserve_terms: list[str], allow_english_terms: list[str] | None
+) -> dict[str, list[str]]:
+    return {
+        "preserve_terms": preserve_terms,
+        "allow_english_terms": list(allow_english_terms or []),
+    }
 
 
 class SemanticQAService:
@@ -164,13 +209,50 @@ class SemanticQAService:
             },
             ensure_ascii=False,
         )
-        payload = self.provider._chat_json(system=system, user=user)
-        usage = payload["usage"]
-        self.input_tokens += usage.input_tokens or 0
-        self.output_tokens += usage.output_tokens or 0
+        payload = self._chat(system=system, user=user)
         raw = payload["json"]
-        raw["field"] = field
+        if isinstance(raw, dict):
+            raw["field"] = field
         return CorrectionResult.model_validate(raw)
+
+    def rework_residual_english(
+        self,
+        *,
+        field: Literal["goal", "description", "kra"],
+        target_language: str,
+        source_text: str,
+        translated_text: str,
+        untranslated_phrases: list[str],
+        preserve_terms: list[str],
+        allow_english_terms: list[str] | None = None,
+        previous_answer_rejected: bool = False,
+    ) -> CorrectionResult:
+        """Second-pass Foundry fix for ordinary English left in the target text."""
+        system = _load_prompt(_RESIDUAL_ENGLISH_PATH)
+        user = json.dumps(
+            {
+                "field": field,
+                "target_language": target_language,
+                "source_text": source_text,
+                "translated_text": translated_text,
+                "untranslated_phrases": untranslated_phrases,
+                "previous_answer_rejected": previous_answer_rejected,
+                **_terminology_user_fields(preserve_terms, allow_english_terms),
+            },
+            ensure_ascii=False,
+        )
+        payload = self._chat(system=system, user=user)
+        raw = payload["json"]
+        if not isinstance(raw, dict):
+            raise FoundryProviderError("Residual English rework returned non-object JSON.")
+        text = str(raw.get("corrected_text") or raw.get("text") or "").strip()
+        if not text:
+            raise FoundryProviderError("Residual English rework returned empty corrected_text.")
+        return CorrectionResult(
+            field=field,
+            corrected_text=text,
+            notes=str(raw.get("notes") or ""),
+        )
 
     def revise_record(
         self,
@@ -184,6 +266,7 @@ class SemanticQAService:
         translated_kra: str,
         preserve_terms: list[str],
         system_prompt: str | None = None,
+        allow_english_terms: list[str] | None = None,
     ) -> RecordRevision:
         """Ask Foundry to repair meaning. Unchanged fields come back as written."""
         originals = {
@@ -191,11 +274,12 @@ class SemanticQAService:
             "description": translated_description,
             "kra": translated_kra,
         }
-        system = (system_prompt or "").strip() or _load_prompt(_REVISION_PATH)
+        base = (system_prompt or "").strip() or _load_prompt(_REVISION_PATH).strip()
+        system = f"{base}\n\n{TERMINOLOGY_CONTRACT.strip()}\n"
         user = json.dumps(
             {
                 "target_language": target_language,
-                "preserve_terms": preserve_terms,
+                **_terminology_user_fields(preserve_terms, allow_english_terms),
                 "source": {
                     "goal": source_goal,
                     "description": source_description,

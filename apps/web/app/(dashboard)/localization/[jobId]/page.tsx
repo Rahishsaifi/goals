@@ -1,12 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { AppShell } from "@/components/AppShell";
 import { WorkerQueueBanner, useWorkerQueue } from "@/components/localization/WorkerQueueBanner";
 import { DownloadButton } from "@/components/localization/DownloadButton";
+import { ExcelViewerDrawer } from "@/components/localization/ExcelViewerDrawer";
+import {
+  HardGateDrawer,
+  type HardGateCheck,
+} from "@/components/localization/HardGateDrawer";
 import {
   ExcelFileIcon,
   ExcelIcon,
@@ -14,7 +19,7 @@ import {
   LogsIcon,
   ReportIcon,
 } from "@/components/localization/icons";
-import { API_BASE, readApiError } from "@/lib/api";
+import { API_BASE, csrfToken, readApiError } from "@/lib/api";
 import {
   BADGE_TONE_CLASS,
   STAGE_LABELS,
@@ -42,6 +47,7 @@ const MILESTONES: { label: string; stages: string[] }[] = [
   { label: "Technical Validation", stages: ["technical_validation", "special_category_validation"] },
   { label: "Excel Reconstruction", stages: ["excel_reconstruction"] },
   { label: "Final Hard Gate", stages: ["final_hard_gate"] },
+  { label: "English Repair", stages: ["english_issue_repair"] },
 ];
 
 const LOG_DOT: Record<string, string> = {
@@ -110,8 +116,39 @@ function asNumber(value: unknown): number | null {
   return value == null || value === "" || Number.isNaN(num) ? null : num;
 }
 
+function parseHardGateChecks(summary: Record<string, unknown>): HardGateCheck[] {
+  const raw = summary.hard_gate;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const row = item as Record<string, unknown>;
+      const name = typeof row.name === "string" ? row.name : "";
+      if (!name) return null;
+      return {
+        name,
+        required: row.required == null ? "" : String(row.required),
+        actual: row.actual == null ? "" : String(row.actual),
+        passed: Boolean(row.passed),
+      };
+    })
+    .filter((item): item is HardGateCheck => item != null);
+}
+
+function openIssueCount(summary: Record<string, unknown>): number {
+  return (
+    (asNumber(summary.unresolved_high_severity_issues) ?? 0) +
+    (asNumber(summary.unresolved_terminology_issues) ?? 0) +
+    (asNumber(summary.unresolved_untranslated_english) ?? 0) +
+    (asNumber(summary.nl_stacked_deadline_violations) ?? 0) +
+    (asNumber(summary.nl_joined_kra_number_violations) ?? 0) +
+    (asNumber(summary.nl_losen_violations) ?? 0)
+  );
+}
+
 export default function LocalizationJobDetailPage() {
   const params = useParams<{ jobId: string }>();
+  const router = useRouter();
   const jobId = params.jobId;
   const session = useSessionInfo(`/localization/${jobId}`);
   const languageNames = useLanguageNames();
@@ -119,6 +156,15 @@ export default function LocalizationJobDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [logsOpen, setLogsOpen] = useState(false);
+  const [versionOpen, setVersionOpen] = useState(false);
+  const [versionFoundry, setVersionFoundry] = useState(true);
+  const [versionNlV2, setVersionNlV2] = useState(true);
+  const [versionBusy, setVersionBusy] = useState(false);
+  const [versionNote, setVersionNote] = useState<string | null>(null);
+  const [hardGateOpen, setHardGateOpen] = useState(false);
+  const [excelOpen, setExcelOpen] = useState(false);
+  const [excelFocusRow, setExcelFocusRow] = useState<number | null>(null);
+  const [excelIssuesOnly, setExcelIssuesOnly] = useState(false);
   const logsRef = useRef<HTMLElement | null>(null);
 
   function toggleLogs() {
@@ -198,12 +244,18 @@ export default function LocalizationJobDetailPage() {
   );
 
   const summary = job?.summary ?? {};
+  const hardGateChecks = useMemo(
+    () => parseHardGateChecks((job?.summary ?? {}) as Record<string, unknown>),
+    [job?.summary],
+  );
   const badge = job ? jobBadge(job) : null;
   const languageName = job ? (languageNames[job.target_language] ?? job.target_language) : "";
   const mode = (job?.options?.qa_mode as string) === "foundry" ? "Foundry" : "Classic";
   const totalTime = job ? formatDuration(jobDurationMs(job, nowMs)) : "—";
   const mismatches =
     (asNumber(summary.numeric_discrepancies) ?? 0) + (asNumber(summary.percentage_discrepancies) ?? 0);
+  const openIssues = openIssueCount(summary);
+  const canInspectHardGate = Boolean(job && terminal && hardGateChecks.length);
 
   return (
     <AppShell email={session.email} role={session.role} orgName={session.orgName}>
@@ -265,12 +317,30 @@ export default function LocalizationJobDetailPage() {
               />
             ) : null}
             {job.has_output ? (
-              <DownloadButton
-                href={jobFileUrl(job.id, "download")}
-                icon={<ExcelIcon />}
-                label="Download Excel File"
-                className="bg-emerald-600 text-white shadow-sm hover:bg-emerald-700"
-              />
+              <>
+                <button
+                  type="button"
+                  className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold transition ${
+                    excelOpen
+                      ? "border-emerald-700 bg-emerald-700 text-white hover:bg-emerald-800"
+                      : "border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
+                  }`}
+                  onClick={() => {
+                    setExcelFocusRow(null);
+                    setExcelIssuesOnly(false);
+                    setExcelOpen((open) => !open);
+                  }}
+                >
+                  <ExcelIcon />
+                  {excelOpen ? "Hide Excel" : "View Excel"}
+                </button>
+                <DownloadButton
+                  href={jobFileUrl(job.id, "download")}
+                  icon={<ExcelIcon />}
+                  label="Download"
+                  className="bg-emerald-600 text-white shadow-sm hover:bg-emerald-700"
+                />
+              </>
             ) : null}
             {job.has_output && badge?.label === "Needs Review" ? (
               <DownloadButton
@@ -280,9 +350,103 @@ export default function LocalizationJobDetailPage() {
                 className="bg-yellow-400 text-yellow-950 shadow-sm hover:bg-yellow-500"
               />
             ) : null}
+            {terminal && (badge?.label === "Completed" || badge?.label === "Needs Review") ? (
+              <button
+                type="button"
+                className="inline-flex items-center gap-2 rounded-xl border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-semibold text-violet-800 transition hover:bg-violet-100"
+                onClick={() => {
+                  setVersionOpen((open) => !open);
+                  setVersionNote(null);
+                  setVersionNlV2(true);
+                }}
+              >
+                New version (reuse translation)
+              </button>
+            ) : null}
           </div>
         ) : null}
       </div>
+
+      {job && versionOpen ? (
+        <div className="tm-card mb-4 space-y-3 p-4">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-950">Create new version from this translation</h2>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              Skips Azure Translator and reuses the existing Dutch/target text. Runs Foundry/QA again and writes a new
+              Excel + report as a separate job. Parent job stays unchanged.
+            </p>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border-slate-300 text-indigo-600"
+              checked={versionFoundry}
+              onChange={() => setVersionFoundry((value) => !value)}
+            />
+            Run Foundry semantic QA on the reused translation
+          </label>
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border-slate-300 text-indigo-600"
+              checked={versionNlV2}
+              onChange={() => setVersionNlV2((value) => !value)}
+            />
+            Apply quality fixes (v2)
+          </label>
+          {versionNote ? <p className="text-xs text-rose-600">{versionNote}</p> : null}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              disabled={versionBusy}
+              className="tm-btn tm-btn-primary !px-3 !py-2 text-sm disabled:opacity-50"
+              onClick={() => {
+                void (async () => {
+                  setVersionBusy(true);
+                  setVersionNote(null);
+                  try {
+                    const response = await fetch(
+                      `${API_BASE}/api/v1/goals-localization/jobs/${job.id}/versions`,
+                      {
+                        method: "POST",
+                        credentials: "include",
+                        headers: {
+                          "content-type": "application/json",
+                          "x-csrf-token": csrfToken(),
+                        },
+                        body: JSON.stringify({
+                          qa_mode: versionFoundry ? "foundry" : "classic",
+                          nl_quality_v2: versionNlV2,
+                        }),
+                      },
+                    );
+                    if (!response.ok) {
+                      throw new Error(await readApiError(response, "Could not create version."));
+                    }
+                    const body = await response.json();
+                    const nextId = String(body.job?.id ?? "");
+                    if (!nextId) throw new Error("Version job id missing.");
+                    router.push(`/localization/${nextId}`);
+                  } catch (err) {
+                    setVersionNote(err instanceof Error ? err.message : "Could not create version.");
+                  } finally {
+                    setVersionBusy(false);
+                  }
+                })();
+              }}
+            >
+              {versionBusy ? "Starting…" : "Start new version"}
+            </button>
+            <button
+              type="button"
+              className="tm-btn tm-btn-ghost !px-3 !py-2 text-sm"
+              onClick={() => setVersionOpen(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <WorkerQueueBanner
         queue={queue}
@@ -320,12 +484,20 @@ export default function LocalizationJobDetailPage() {
                 label="Fields Revised"
                 tone="bg-violet-50 text-violet-600"
               />
-              <Stat
-                icon="⚗"
-                value={asNumber(summary.unresolved_issues)?.toLocaleString() ?? "—"}
-                label="Open Issues"
-                tone="bg-violet-50 text-violet-600"
-              />
+              <button
+                type="button"
+                className={`text-left ${canInspectHardGate && openIssues > 0 ? "cursor-pointer rounded-lg hover:bg-slate-50" : ""}`}
+                disabled={!canInspectHardGate || openIssues === 0}
+                onClick={() => setHardGateOpen(true)}
+                title={canInspectHardGate && openIssues > 0 ? "View hard-gate issues" : undefined}
+              >
+                <Stat
+                  icon="⚗"
+                  value={terminal ? openIssues.toLocaleString() : (asNumber(summary.unresolved_issues)?.toLocaleString() ?? "—")}
+                  label="Open Issues"
+                  tone="bg-violet-50 text-violet-600"
+                />
+              </button>
             </div>
 
             <div className="mx-4 mt-3 border-t border-slate-100 pt-3">
@@ -397,6 +569,15 @@ export default function LocalizationJobDetailPage() {
                             : NaN;
                       const durationMs = rawDurationMs >= 0 ? rawDurationMs : NaN;
                       const warn = stage === "final_hard_gate" && gateFailed;
+                      const inspectable =
+                        canInspectHardGate &&
+                        (stage === "final_hard_gate" ||
+                          (stage === "english_issue_repair" &&
+                            Boolean(progress.english_issue_repair?.detail) &&
+                            !String(progress.english_issue_repair?.detail ?? "").startsWith(
+                              "Skipped",
+                            )) ||
+                          (stage === "technical_validation" && openIssues > 0));
                       const pill =
                         state === "done"
                           ? warn
@@ -420,12 +601,40 @@ export default function LocalizationJobDetailPage() {
                                 : "Failed"
                               : "Pending";
                       return (
-                        <tr key={stage} className="border-b border-slate-50 last:border-0">
+                        <tr
+                          key={stage}
+                          className={`border-b border-slate-50 last:border-0 ${
+                            inspectable
+                              ? "cursor-pointer hover:bg-amber-50/60 focus-within:bg-amber-50/60"
+                              : ""
+                          }`}
+                          onClick={inspectable ? () => setHardGateOpen(true) : undefined}
+                          onKeyDown={
+                            inspectable
+                              ? (event) => {
+                                  if (event.key === "Enter" || event.key === " ") {
+                                    event.preventDefault();
+                                    setHardGateOpen(true);
+                                  }
+                                }
+                              : undefined
+                          }
+                          tabIndex={inspectable ? 0 : undefined}
+                          role={inspectable ? "button" : undefined}
+                          aria-label={
+                            inspectable
+                              ? `View issues for ${STAGE_LABELS[stage] ?? stage}`
+                              : undefined
+                          }
+                        >
                           <td className="py-2.5 pr-3">
                             <span className="flex items-center gap-2.5">
                               <StepCircle state={warn ? "warning" : state} />
                               <span className={state === "pending" ? "text-slate-400" : "text-slate-800"}>
                                 {STAGE_LABELS[stage] ?? stage.replaceAll("_", " ")}
+                                {inspectable ? (
+                                  <span className="ml-2 text-[11px] font-medium text-indigo-600">View issues →</span>
+                                ) : null}
                               </span>
                             </span>
                           </td>
@@ -495,11 +704,62 @@ export default function LocalizationJobDetailPage() {
                     label="Operational QA"
                     value={<PassFail value={summary.operational_productivity_qa_pass} />}
                   />
-                  <Metric label="Hard gate" value={terminal ? <PassFail value={job.production_ready} /> : "—"} />
+                  <div>
+                    <p className="text-xs text-slate-500">Hard gate</p>
+                    <div className="mt-0.5 text-lg font-bold tabular-nums text-slate-950">
+                      {terminal ? (
+                        <button
+                          type="button"
+                          className={`rounded ${
+                            canInspectHardGate
+                              ? "cursor-pointer ring-offset-2 hover:ring-2 hover:ring-indigo-200"
+                              : ""
+                          }`}
+                          disabled={!canInspectHardGate}
+                          onClick={() => setHardGateOpen(true)}
+                          title={canInspectHardGate ? "View hard-gate checks and issues" : undefined}
+                        >
+                          <PassFail value={job.production_ready} />
+                        </button>
+                      ) : (
+                        "—"
+                      )}
+                    </div>
+                  </div>
                 </div>
               </section>
             </div>
           </div>
+
+          {job ? (
+            <>
+              <ExcelViewerDrawer
+                open={excelOpen}
+                onClose={() => {
+                  setExcelOpen(false);
+                  setExcelFocusRow(null);
+                  setExcelIssuesOnly(false);
+                }}
+                jobId={job.id}
+                filename={outputFilename(job)}
+                focusExcelRow={excelFocusRow}
+                issuesOnlyDefault={excelIssuesOnly}
+              />
+              <HardGateDrawer
+                open={hardGateOpen}
+                onClose={() => setHardGateOpen(false)}
+                jobId={job.id}
+                checks={hardGateChecks}
+                showBackdrop={!excelOpen}
+                nested={excelOpen}
+                onShowInExcel={(excelRow) => {
+                  setExcelFocusRow(excelRow);
+                  setExcelIssuesOnly(true);
+                  setExcelOpen(true);
+                }}
+              />
+            </>
+          ) : null}
 
           {logsOpen ? (
             <section ref={logsRef} className="tm-card mt-5 scroll-mt-20 px-5 py-4">

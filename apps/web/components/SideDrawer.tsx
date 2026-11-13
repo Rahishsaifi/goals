@@ -10,6 +10,7 @@ export function SideDrawer({
   side = "right",
   dark = false,
   nested = false,
+  showBackdrop = true,
 }: {
   open: boolean;
   onClose: () => void;
@@ -19,6 +20,8 @@ export function SideDrawer({
   dark?: boolean;
   /** Stack above another drawer and claim Escape first. */
   nested?: boolean;
+  /** When false, panel docks without dimming the page (for side-by-side panels). */
+  showBackdrop?: boolean;
 }) {
   const [mounted, setMounted] = useState(open);
   const [entered, setEntered] = useState(false);
@@ -63,23 +66,27 @@ export function SideDrawer({
 
   return (
     <div
-      className={`tm-drawer fixed inset-0 flex ${nested ? "z-[60]" : "z-50"}`}
+      className={`tm-drawer fixed inset-0 flex ${nested ? "z-[60]" : "z-50"} ${
+        showBackdrop ? "" : "pointer-events-none"
+      }`}
       data-side={side}
     >
-      <button
-        type="button"
-        className={`tm-drawer-backdrop absolute inset-0 bg-slate-950/45 backdrop-blur-[2px] transition-opacity ease-out ${
-          entered ? "opacity-100" : "opacity-0"
-        }`}
-        aria-label="Close panel"
-        onClick={onClose}
-      />
+      {showBackdrop ? (
+        <button
+          type="button"
+          className={`tm-drawer-backdrop absolute inset-0 bg-slate-950/45 backdrop-blur-[2px] transition-opacity ease-out ${
+            entered ? "opacity-100" : "opacity-0"
+          }`}
+          aria-label="Close panel"
+          onClick={onClose}
+        />
+      ) : null}
       <aside
-        className={`tm-drawer-panel relative z-10 flex h-full min-w-0 flex-col shadow-2xl transition-transform ease-[cubic-bezier(0.22,1,0.36,1)] ${
+        className={`tm-drawer-panel pointer-events-auto relative z-10 flex h-full min-w-0 flex-col shadow-2xl transition-transform ease-[cubic-bezier(0.22,1,0.36,1)] ${
           dark ? "bg-[var(--sidebar)] text-slate-200" : "bg-white"
         } ${side === "right" ? "ml-auto" : "mr-auto"} ${widthClassName} ${panelFrom}`}
         role="dialog"
-        aria-modal="true"
+        aria-modal={showBackdrop}
       >
         {children}
       </aside>

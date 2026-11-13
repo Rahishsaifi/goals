@@ -129,4 +129,5 @@ STAGE_ORDER: tuple[str, ...] = (
     "special_category_validation",
     "excel_reconstruction",
     "final_hard_gate",
+    "english_issue_repair",
 )

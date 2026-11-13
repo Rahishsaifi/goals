@@ -104,6 +104,7 @@ export function StartLocalizationDrawer({ open, onClose }: { open: boolean; onCl
   const [mandatoryOptions, setMandatoryOptions] = useState<string[]>(Object.keys(OPTION_LABELS));
   const [targetLanguage, setTargetLanguage] = useState("zh");
   const [qaMode, setQaMode] = useState<QaMode>("classic");
+  const [nlQualityV2, setNlQualityV2] = useState(false);
   const [glossary, setGlossary] = useState<GlossaryTerm[]>(DEFAULT_GLOSSARY);
   const [glossaryDraft, setGlossaryDraft] = useState("");
   const [glossaryAction, setGlossaryAction] = useState<GlossaryTerm["action"]>("preserve");
@@ -238,6 +239,7 @@ export function StartLocalizationDrawer({ open, onClose }: { open: boolean; onCl
       const form = new FormData();
       form.append("target_language", targetLanguage);
       form.append("qa_mode", qaMode);
+      form.append("nl_quality_v2", nlQualityV2 ? "true" : "false");
       form.append("english_csv", englishFile, englishFile.name);
       const response = await fetch(`${API_BASE}/api/v1/goals-localization/jobs`, {
         method: "POST",
@@ -495,6 +497,33 @@ export function StartLocalizationDrawer({ open, onClose }: { open: boolean; onCl
                 />
               </button>
             </label>
+            <label className="flex items-center justify-between gap-2 text-xs text-slate-800 sm:col-span-2">
+              <span className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={nlQualityV2}
+                  onChange={() => setNlQualityV2((prev) => !prev)}
+                  className="h-3.5 w-3.5 rounded border-slate-300 text-indigo-600"
+                />
+                <span>Apply quality fixes (v2)</span>
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={nlQualityV2}
+                aria-label="Toggle quality fixes v2"
+                onClick={() => setNlQualityV2((prev) => !prev)}
+                className={`relative h-5 w-9 shrink-0 rounded-full transition ${
+                  nlQualityV2 ? "bg-indigo-600" : "bg-slate-300"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white shadow transition ${
+                    nlQualityV2 ? "translate-x-4" : "translate-x-0"
+                  }`}
+                />
+              </button>
+            </label>
           </div>
           <p className="mt-1.5 text-[11px] leading-4 text-slate-500">
             {qaMode === "foundry"
@@ -503,6 +532,12 @@ export function StartLocalizationDrawer({ open, onClose }: { open: boolean; onCl
                 ? "English is copied through and the workbook Code column is set to en."
                 : "Foundry is off. Translator, protected terms, and Python checks. Semantic accuracy still needs human review."}
           </p>
+          {nlQualityV2 ? (
+            <p className="mt-1 text-[11px] leading-4 text-amber-700">
+              Quality v2 restores deadline quarters (including pipe-separated KRAs) and KRA measure
+              numbering in code for every language. Dutch also gets stacked-deadline / Losen checks.
+            </p>
+          ) : null}
         </div>
       </div>
 
